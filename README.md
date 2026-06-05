@@ -17,6 +17,13 @@ git clone https://github.com/mujocolab/mjlab_playground.git && cd mjlab_playgrou
 uv sync
 ```
 
+## Docker
+
+For containerized workstation and HPC experiments, use the CUDA 12.8 development
+image `mjlab-playground:cuda128-dev`. See
+[`docs/docker_cuda128_workflow.md`](docs/docker_cuda128_workflow.md) for the
+build, validation, transfer, and launcher workflow.
+
 Train a task:
 
 ```bash
