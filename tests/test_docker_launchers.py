@@ -192,7 +192,9 @@ def test_home_and_cache_overrides_mount_to_container_runtime_dirs(
   )
 
 
-def test_run_passes_arbitrary_command_without_task_specific_mode(tmp_path: Path) -> None:
+def test_run_passes_arbitrary_command_without_task_specific_mode(
+  tmp_path: Path,
+) -> None:
   result = run_launcher(
     WS_LAUNCHER,
     ["run", "list-envs", "--keyword", "Getup"],
