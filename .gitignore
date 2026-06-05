@@ -9,13 +9,15 @@ wheels/
 # Virtual environments
 .venv
 
-# Logs and checkpoints
+# Logs, checkpoints, and container runtime outputs
 logs/
 wandb/
+artifacts/
+.container_home/
+.container_cache/
 *.pt
 *.onnx
-
-scripts/
+*.tar
 
 # Tools
 .ruff_cache/
