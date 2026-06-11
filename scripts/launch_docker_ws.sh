@@ -2,8 +2,9 @@
 #
 # Launch mjlab_playground in Docker on a local workstation.
 #
-# The launcher mounts the live checkout at /workspace/mjlab_playground while
-# using the baked virtualenv from /app/.venv inside mjlab-playground:cuda128-dev.
+# The launcher mounts sibling mjlab and mjlab_playground checkouts under
+# /workspace/mujocolab while using the baked virtualenv from /app/.venv inside
+# mjlab-playground:cuda128-dev.
 
 set -eu
 

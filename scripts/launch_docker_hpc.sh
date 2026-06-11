@@ -3,8 +3,9 @@
 # Launch mjlab_playground in Docker on an HPC node.
 #
 # The script assumes mjlab-playground:cuda128-dev has already been loaded on the
-# HPC host. It mounts this checkout at /workspace/mjlab_playground so training
-# logs and artifacts stay on the HPC filesystem.
+# HPC host. It mounts sibling mjlab and mjlab_playground checkouts under
+# /workspace/mujocolab so training logs and artifacts stay on the HPC
+# filesystem.
 
 set -eu
 

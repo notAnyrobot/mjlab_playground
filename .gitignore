@@ -9,15 +9,27 @@ wheels/
 # Virtual environments
 .venv
 
+# Local agent/session metadata
+.agents/
+.codex/
+
 # Logs, checkpoints, and container runtime outputs
 logs/
 wandb/
 artifacts/
+data/
 .container_home/
 .container_cache/
 *.pt
+*.pth
+*.ckpt
 *.onnx
 *.tar
 
 # Tools
 .ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Misc
+docs/superpowers/
