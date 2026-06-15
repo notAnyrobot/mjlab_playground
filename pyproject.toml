@@ -20,7 +20,7 @@ mjlab = { workspace = true }
 members = ["../mjlab"]
 
 [tool.ruff]
-indent-width = 2
+indent-width = 4
 src = ["src/mjlab_playground"]
 exclude = ["typings"]
 
