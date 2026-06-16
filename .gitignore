@@ -32,4 +32,6 @@ data/
 .mypy_cache/
 
 # Misc
+.vscode/
 docs/superpowers/
+docs/agents/
