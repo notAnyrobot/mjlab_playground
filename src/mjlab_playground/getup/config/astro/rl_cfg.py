@@ -54,6 +54,6 @@ def astro_getup_ppo_runner_cfg() -> MjpOnPolicyRunnerCfg:
         experiment_name="astro_getup",
         wandb_project="mjlab_playground",
         save_interval=500,
-        num_steps_per_env=24,
+        num_steps_per_env=32,   # 24
         max_iterations=50_000,
     )

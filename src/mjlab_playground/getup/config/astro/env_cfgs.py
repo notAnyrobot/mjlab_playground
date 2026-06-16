@@ -23,7 +23,7 @@ _TORSO_HEIGHT = 0.7515
 _PELVIS_HEIGHT = 0.7145
 
 
-def astro_getup_env_cfg(play: bool = True) -> ManagerBasedRlEnvCfg:
+def astro_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create Astro getup task configuration."""
     cfg = make_getup_env_cfg()
 
