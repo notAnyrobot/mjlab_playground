@@ -13,12 +13,22 @@ wheels/
 .agents/
 .codex/
 
+# AI-generated local study artifacts
+reference/
+lessons/
+
 # Logs, checkpoints, and container runtime outputs
+logs
 logs/
+wandb
 wandb/
+artifacts
 artifacts/
+data
 data/
+.container_home
 .container_home/
+.container_cache
 .container_cache/
 *.pt
 *.pth
