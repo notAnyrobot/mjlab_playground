@@ -16,6 +16,11 @@ build-backend = "uv_build"
 [tool.uv.sources]
 mjlab = { workspace = true }
 
+[tool.uv]
+constraint-dependencies = [
+    "setuptools<81",
+]
+
 [tool.uv.workspace]
 members = ["../mjlab"]
 
