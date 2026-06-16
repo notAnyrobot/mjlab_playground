@@ -43,5 +43,6 @@ data/
 
 # Misc
 .vscode/
+.worktrees/
 docs/superpowers/
 docs/agents/
