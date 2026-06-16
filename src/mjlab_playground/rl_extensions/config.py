@@ -1,7 +1,7 @@
 """Extension configuration for the RL algorithms."""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
@@ -26,10 +26,20 @@ class MjpPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     symmetry_cfg: dict[str, Any] | None = None
     """Optional RSL-RL symmetry augmentation config."""
 
-    class_name: str = "mjlab_playground.rl_extensions.MjRlPpo"
-    """Algorithm class name resolved to MjpRlPpo by RSL-RL."""
+    class_name: str = "mjlab_playground.rl_extensions.MjpPpo"
+    """Algorithm class name resolved to MjpPpo by RSL-RL."""
 
 
 @dataclass
 class MjpOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
-    pass
+
+    obs_groups: dict[str, tuple[str, ...]] = field(
+        default_factory=lambda: {
+            "actor": ("actor",),
+            "critic": ("critic",),
+        },
+    )
+
+    logger: Literal["wandb", "tensorboard"] = "wandb"
+    wandb_project: str = "mjlab_playground"
+    upload_model: bool = False

@@ -16,12 +16,7 @@ class L2C2Cfg:
     """Enable L2C2 regularization."""
     lambda_l2c2: float = 0.1
     """The coefficient for the L2C2 regularization."""
-    clean_obs_group: str = "actor_clean"
-    """Deprecated fallback clean observation group.
-
-    L2C2 now derives clean groups from the actor observation groups plus
-    ``clean_obs_suffix``. This field is kept for backward compatibility when
-    actor observation group keys are unavailable during algorithm construction.
-    """
     clean_obs_suffix: str = "_clean"
     """Suffix appended to each actor observation group to find its clean counterpart."""
+    clean_obs_groups: dict[str, str] | None = None
+    """Resolved actor observation group to clean observation group mapping."""

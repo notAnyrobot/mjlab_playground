@@ -24,15 +24,15 @@ class L2C2:
         self,
         enable: bool = True,
         lambda_l2c2: float = 0.1,
-        clean_obs_group: str = "actor_clean",
         clean_obs_suffix: str = "_clean",
+        clean_obs_groups: dict[str, str] | None = None,
         eps: float = 1e-8,
         device: str = "cpu",
     ) -> None:
         self.enable = enable
         self.lambda_l2c2 = lambda_l2c2
-        self.clean_obs_group = clean_obs_group
         self.clean_obs_suffix = clean_obs_suffix
+        self.clean_obs_groups = clean_obs_groups
         self.eps = eps
         self.device = device
 
@@ -52,17 +52,36 @@ class L2C2:
     ) -> TensorDict:
         clean_td = obs_td.clone(recurse=False)
         for key in actor_obs_groups:
-            clean_key = f"{key}{self.clean_obs_suffix}"
-            if clean_key not in obs_td.keys():
-                if len(actor_obs_groups) == 1 and self.clean_obs_group in obs_td.keys():
-                    clean_key = self.clean_obs_group
-                else:
-                    raise KeyError(
-                        f"L2C2 requires '{clean_key}' in observations for actor group '{key}'. "
-                        "Ensure the env config publishes it (see sync_actor_clean_observation_groups)."
-                    )
+            clean_key = self._resolve_clean_obs_group(obs_td, key, actor_obs_groups)
             clean_td[key] = obs_td[clean_key]
         return clean_td
+
+    def _resolve_clean_obs_group(
+        self,
+        obs_td: TensorDict,
+        actor_group: str,
+        actor_obs_groups: tuple[str, ...],
+    ) -> str:
+        if self.clean_obs_groups is not None:
+            if actor_group not in self.clean_obs_groups:
+                raise KeyError(
+                    f"L2C2 resolved clean observation groups do not include actor group '{actor_group}'."
+                )
+            clean_group = self.clean_obs_groups[actor_group]
+            if clean_group not in obs_td.keys():
+                raise KeyError(
+                    f"L2C2 requires resolved clean observation group '{clean_group}' "
+                    f"for actor group '{actor_group}'."
+                )
+            return clean_group
+
+        clean_group = f"{actor_group}{self.clean_obs_suffix}"
+        if clean_group in obs_td.keys():
+            return clean_group
+        raise KeyError(
+            f"L2C2 requires '{clean_group}' in observations for actor group '{actor_group}'. "
+            "Ensure the env config publishes it (see sync_actor_clean_observation_groups)."
+        )
 
     def compute_actor_loss(
         self,
@@ -120,20 +139,30 @@ def resolve_l2c2_config(
         alg_cfg["l2c2_cfg"] = None
         return alg_cfg
 
+    if "clean_obs_group" in cfg:
+        raise ValueError(
+            "L2C2 clean_obs_group is deprecated. Publish clean observations with "
+            "the configured clean_obs_suffix and let resolve_l2c2_config derive clean_obs_groups."
+        )
+
     suffix = cfg.get("clean_obs_suffix", "_clean")
     actor_groups = tuple(obs_groups["actor"])
-    fallback_group = cfg.get("clean_obs_group", "actor_clean")
+    clean_obs_groups: dict[str, str] = {}
     for actor_group in actor_groups:
         clean_group = f"{actor_group}{suffix}"
-        if clean_group in obs.keys():
-            continue
-        if len(actor_groups) == 1 and fallback_group in obs.keys():
-            continue
-        else:
+        if clean_group not in obs.keys():
             raise KeyError(
                 f"L2C2 requires '{clean_group}' in observations for actor group '{actor_group}'. "
                 "Ensure the env config publishes it (see sync_actor_clean_observation_groups)."
             )
+        if obs[actor_group].shape != obs[clean_group].shape:
+            raise ValueError(
+                f"L2C2 clean observation group '{clean_group}' must have the same shape as "
+                f"actor observation group '{actor_group}'. Got {obs[clean_group].shape} and "
+                f"{obs[actor_group].shape}."
+            )
+        clean_obs_groups[actor_group] = clean_group
 
+    cfg["clean_obs_groups"] = clean_obs_groups
     alg_cfg["l2c2_cfg"] = cfg
     return alg_cfg

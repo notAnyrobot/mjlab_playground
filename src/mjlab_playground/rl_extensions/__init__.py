@@ -1,5 +1,6 @@
 """Modular extensions of rsl_rl."""
 
+from mjlab_playground.rl_extensions.algorithms import MjpPpo as MjpPpo
 from mjlab_playground.rl_extensions.config import (
     MjpModelCfg as MjpModelCfg,
 )

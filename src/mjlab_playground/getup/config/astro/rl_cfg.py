@@ -29,7 +29,6 @@ def astro_getup_ppo_runner_cfg() -> MjpOnPolicyRunnerCfg:
     l2c2: L2C2Cfg = L2C2Cfg(
         enable=True,
         lambda_l2c2=0.1,
-        clean_obs_group="actor_clean",
         clean_obs_suffix="_clean",
     )
     algorithm: MjpPpoAlgorithmCfg = MjpPpoAlgorithmCfg(

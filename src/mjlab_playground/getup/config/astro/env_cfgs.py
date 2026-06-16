@@ -11,6 +11,10 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_playground.asset_zoo.robots.astro.astro_constants import get_astro_robot_cfg
 from mjlab_playground.getup import mdp
+from mjlab_playground.getup.component_factory import (
+    build_clean_actor_obs,
+    reduced_proprio_current,
+)
 from mjlab_playground.getup.getup_env_cfg import make_getup_env_cfg
 from mjlab_playground.getup.mdp.actions import SettleRelativeJointPositionActionCfg
 
@@ -81,6 +85,11 @@ def astro_getup_env_cfg(play: bool = True) -> ManagerBasedRlEnvCfg:
         "robot", body_names=("torso_link",)
     )
 
+    cfg.observations["actor"] = reduced_proprio_current(enable_corruption=True)
+    cfg.observations["critic"] = reduced_proprio_current(
+        enable_corruption=False,
+        with_state_estimation=True,
+    )
     # Override projected_gravity to use torso_link instead of pelvis (root).
     _torso_cfg = SceneEntityCfg("robot", body_names=("torso_link",))
     cfg.observations["actor"].terms["projected_gravity"] = ObservationTermCfg(
@@ -92,6 +101,8 @@ def astro_getup_env_cfg(play: bool = True) -> ManagerBasedRlEnvCfg:
         func=mdp.body_projected_gravity,
         params={"asset_cfg": _torso_cfg},
     )
+    # Clean counterparts for L2C2
+    build_clean_actor_obs(cfg)
 
     cfg.viewer.body_name = "torso_link"
 
@@ -126,7 +137,6 @@ def astro_getup_env_cfg(play: bool = True) -> ManagerBasedRlEnvCfg:
         weight=-0.1,
         params={"threshold": 2.0},  # rad/s
     )
-
     if play:
         cfg.observations["actor"].enable_corruption = False
         cfg.events["reset_fallen_or_standing"].params["fall_probability"] = 1.0
