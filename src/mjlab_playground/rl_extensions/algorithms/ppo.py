@@ -29,23 +29,46 @@ from mjlab_playground.rl_extensions.l2c2 import L2C2, resolve_l2c2_config
 class MjpPpoLosses:
     """Container for the losses of the MjpRlPpo algorithm."""
 
-    policy_loss: torch.Tensor
-    """The policy loss."""
+    ppo_loss: torch.Tensor
+    """The PPO loss used for the actor/critic optimizer."""
+
+    surrogate_loss: torch.Tensor
+    """The surrogate policy loss."""
 
     value_loss: torch.Tensor
     """The value loss."""
 
-    entropy_loss: torch.Tensor
-    """The entropy loss."""
+    entropy: torch.Tensor
+    """The mean entropy."""
 
-    l2c2_loss: torch.Tensor | None
-    """The L2C2 loss."""
-
-    rnd_loss: torch.Tensor | None
+    rnd_loss: torch.Tensor | None = None
     """The RND loss."""
 
-    symmetry_loss: torch.Tensor | None
+    symmetry_loss: torch.Tensor | None = None
     """The symmetry loss."""
+
+    l2c2_loss: torch.Tensor | None = None
+    """The L2C2 loss."""
+
+
+@dataclass
+class MjpPpoLossContext:
+    """Inputs needed to compute losses for one PPO mini-batch."""
+
+    batch: RolloutStorage.Batch
+    """The mini-batch from rollout storage."""
+
+    original_batch_size: int
+    """Number of non-augmented samples in the mini-batch."""
+
+    actions_log_prob: torch.Tensor
+    """Current action log probabilities."""
+
+    values: torch.Tensor
+    """Current critic values."""
+
+    entropy: torch.Tensor
+    """Current actor entropy for original samples."""
 
 
 class MjpPpo(PPO):
@@ -67,6 +90,55 @@ class MjpPpo(PPO):
             self.l2c2 = L2C2(device=self.device, **l2c2_cfg)
             self.l2c2.validate_models(actor, critic)
 
+    def compute_losses(self, context: MjpPpoLossContext) -> MjpPpoLosses:
+        """Compute PPO loss components for one mini-batch."""
+        batch = context.batch
+
+        # Surrogate loss
+        ratio = torch.exp(context.actions_log_prob - torch.squeeze(batch.old_actions_log_prob))  # type: ignore
+        surrogate = -torch.squeeze(batch.advantages) * ratio  # type: ignore
+        surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(  # type: ignore
+            ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+        )
+        surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+        # Value function loss
+        if self.use_clipped_value_loss:
+            value_clipped = batch.values + (context.values - batch.values).clamp(-self.clip_param, self.clip_param)
+            value_losses = (context.values - batch.returns).pow(2)
+            value_losses_clipped = (value_clipped - batch.returns).pow(2)
+            value_loss = torch.max(value_losses, value_losses_clipped).mean()
+        else:
+            value_loss = (batch.returns - context.values).pow(2).mean()
+
+        entropy = context.entropy.mean()
+        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy
+        rnd_loss = (
+            self.rnd.compute_loss(batch.observations[: context.original_batch_size])  # type: ignore
+            if self.rnd
+            else None
+        )
+        symmetry_loss = None
+        if self.symmetry:
+            symmetry_loss = self.symmetry.compute_loss(self.actor, batch, context.original_batch_size)
+            if self.symmetry.use_mirror_loss:
+                ppo_loss = ppo_loss + self.symmetry.mirror_loss_coeff * symmetry_loss
+        l2c2_loss = None
+        if self.l2c2:
+            l2c2_result = self.l2c2.compute_loss(self.actor, batch, context.original_batch_size)
+            l2c2_loss = l2c2_result.weighted
+            ppo_loss = ppo_loss + l2c2_loss
+
+        return MjpPpoLosses(
+            ppo_loss=ppo_loss,
+            surrogate_loss=surrogate_loss,
+            value_loss=value_loss,
+            entropy=entropy,
+            rnd_loss=rnd_loss,
+            symmetry_loss=symmetry_loss,
+            l2c2_loss=l2c2_loss,
+        )
+
 
     def update(self) -> dict[str, float]:
         """Run optimization epochs over stored batches and return mean losses."""
@@ -77,6 +149,8 @@ class MjpPpo(PPO):
         mean_rnd_loss = 0 if self.rnd else None
         # Symmetry loss
         mean_symmetry_loss = 0 if self.symmetry else None
+        # L2C2 loss
+        mean_l2c2_loss = 0 if self.l2c2 else None
 
         # Get mini-batch generator
         if self.actor.is_recurrent or self.critic.is_recurrent:
@@ -139,41 +213,23 @@ class MjpPpo(PPO):
                     for param_group in self.optimizer.param_groups:
                         param_group["lr"] = self.learning_rate
 
-            # Surrogate loss
-            ratio = torch.exp(actions_log_prob - torch.squeeze(batch.old_actions_log_prob))  # type: ignore
-            surrogate = -torch.squeeze(batch.advantages) * ratio  # type: ignore
-            surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(  # type: ignore
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+            losses = self.compute_losses(
+                MjpPpoLossContext(
+                    batch=batch,
+                    original_batch_size=original_batch_size,
+                    actions_log_prob=actions_log_prob,
+                    values=values,
+                    entropy=entropy,
+                )
             )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-
-            # Value function loss
-            if self.use_clipped_value_loss:
-                value_clipped = batch.values + (values - batch.values).clamp(-self.clip_param, self.clip_param)
-                value_losses = (values - batch.returns).pow(2)
-                value_losses_clipped = (value_clipped - batch.returns).pow(2)
-                value_loss = torch.max(value_losses, value_losses_clipped).mean()
-            else:
-                value_loss = (batch.returns - values).pow(2).mean()
-
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
-
-            # RND loss
-            rnd_loss = self.rnd.compute_loss(batch.observations[:original_batch_size]) if self.rnd else None  # type: ignore
-
-            # Symmetry loss
-            if self.symmetry:
-                symmetry_loss = self.symmetry.compute_loss(self.actor, batch, original_batch_size)
-                if self.symmetry.use_mirror_loss:
-                    loss = loss + self.symmetry.mirror_loss_coeff * symmetry_loss
 
             # Compute the gradients for PPO
             self.optimizer.zero_grad()
-            loss.backward()
+            losses.ppo_loss.backward()
             # Compute the gradients for RND
             if self.rnd:
                 self.rnd.optimizer.zero_grad()
-                rnd_loss.backward()
+                losses.rnd_loss.backward()  # type: ignore
 
             # Collect gradients from all GPUs
             if self.is_multi_gpu:
@@ -188,15 +244,18 @@ class MjpPpo(PPO):
                 self.rnd.optimizer.step()
 
             # Store the losses
-            mean_value_loss += value_loss.item()
-            mean_surrogate_loss += surrogate_loss.item()
-            mean_entropy += entropy.mean().item()
+            mean_value_loss += losses.value_loss.item()
+            mean_surrogate_loss += losses.surrogate_loss.item()
+            mean_entropy += losses.entropy.item()
             # RND loss
             if mean_rnd_loss is not None:
-                mean_rnd_loss += rnd_loss.item()
+                mean_rnd_loss += losses.rnd_loss.item()  # type: ignore
             # Symmetry loss
             if mean_symmetry_loss is not None:
-                mean_symmetry_loss += symmetry_loss.item()
+                mean_symmetry_loss += losses.symmetry_loss.item()  # type: ignore
+            # L2C2 loss
+            if mean_l2c2_loss is not None:
+                mean_l2c2_loss += losses.l2c2_loss.item()  # type: ignore
 
         # Divide the losses by the number of updates
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -207,6 +266,8 @@ class MjpPpo(PPO):
             mean_rnd_loss /= num_updates
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
+        if mean_l2c2_loss is not None:
+            mean_l2c2_loss /= num_updates
 
         # Construct the loss dictionary
         loss_dict = {
@@ -218,6 +279,8 @@ class MjpPpo(PPO):
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if self.l2c2:
+            loss_dict["l2c2"] = mean_l2c2_loss
 
         # Clear the storage
         self.storage.clear()
