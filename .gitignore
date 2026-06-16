@@ -14,6 +14,9 @@ wheels/
 .codex/
 
 # AI-generated local study artifacts
+MISSION.md
+NOTES.md
+RESOURCES.md
 reference/
 lessons/
 
