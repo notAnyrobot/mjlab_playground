@@ -40,6 +40,7 @@ class MjpOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
         },
     )
 
-    logger: Literal["wandb", "tensorboard"] = "wandb"
+    save_interval: int = 500
+    logger: Literal["wandb", "tensorboard"] = "tensorboard"
     wandb_project: str = "mjlab_playground"
     upload_model: bool = False
