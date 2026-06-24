@@ -8,8 +8,8 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.scene import Scene
-from mjlab_playground.getup.config.go1.env_cfgs import unitree_go1_getup_env_cfg
-from mjlab_playground.getup.config.t1.env_cfgs import booster_t1_getup_env_cfg
+from mjlab_playground.tasks.getup.config.go1.env_cfgs import unitree_go1_getup_env_cfg
+from mjlab_playground.tasks.getup.config.t1.env_cfgs import booster_t1_getup_env_cfg
 
 _NUM_ENVS = 5
 

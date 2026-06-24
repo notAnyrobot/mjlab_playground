@@ -6,7 +6,7 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
-from mjlab_playground.getup import mdp
+from mjlab_playground.tasks.getup import mdp
 
 
 def reduced_proprio_current(

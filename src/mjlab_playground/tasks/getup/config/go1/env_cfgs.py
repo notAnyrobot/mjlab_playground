@@ -9,8 +9,8 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.utils.spec_config import CollisionCfg
 
-from mjlab_playground.getup import mdp
-from mjlab_playground.getup.getup_env_cfg import make_getup_env_cfg
+from mjlab_playground.tasks.getup import mdp
+from mjlab_playground.tasks.getup.getup_env_cfg import make_getup_env_cfg
 
 _TORSO_HEIGHT = 0.275
 

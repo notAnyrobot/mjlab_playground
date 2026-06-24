@@ -10,13 +10,15 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_playground.asset_zoo.robots.astro.astro_constants import get_astro_robot_cfg
-from mjlab_playground.getup import mdp
-from mjlab_playground.getup.component_factory import (
+from mjlab_playground.tasks.getup import mdp
+from mjlab_playground.tasks.getup.component_factory import (
     build_clean_actor_obs,
     reduced_proprio_current,
 )
-from mjlab_playground.getup.getup_env_cfg import make_getup_env_cfg
-from mjlab_playground.getup.mdp.actions import SettleRelativeJointPositionActionCfg
+from mjlab_playground.tasks.getup.getup_env_cfg import make_getup_env_cfg
+from mjlab_playground.tasks.getup.mdp.actions import (
+    SettleRelativeJointPositionActionCfg,
+)
 
 # Derived from default pose (knees bent) keyframe.
 _TORSO_HEIGHT = 0.7515

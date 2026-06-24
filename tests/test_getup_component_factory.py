@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
-from mjlab_playground.getup.component_factory import clean_actor_obs_groups
-from mjlab_playground.getup.config.astro.env_cfgs import astro_getup_env_cfg
+from mjlab_playground.tasks.getup.component_factory import clean_actor_obs_groups
+from mjlab_playground.tasks.getup.config.astro.env_cfgs import astro_getup_env_cfg
 
 
 def _dummy_obs(*args, **kwargs):  # noqa: ANN002, ANN003
