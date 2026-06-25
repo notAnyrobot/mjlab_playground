@@ -1,17 +1,17 @@
 """RL configuration for Dobot Astro getup task"""
 
 from mjlab_playground.rl_extensions import (
-    MjpModelCfg,
-    MjpOnPolicyRunnerCfg,
-    MjpPpoAlgorithmCfg,
+    MjPgModelCfg,
+    MjPgOnPolicyRunnerCfg,
+    MjPgPpoAlgorithmCfg,
 )
 from mjlab_playground.rl_extensions.l2c2 import L2C2Cfg
 
 
-def astro_getup_ppo_runner_cfg() -> MjpOnPolicyRunnerCfg:
+def astro_getup_ppo_runner_cfg() -> MjPgOnPolicyRunnerCfg:
     """Create RL runner configuration for Astro getup task."""
 
-    actor: MjpModelCfg = MjpModelCfg(
+    actor: MjPgModelCfg = MjPgModelCfg(
         hidden_dims=(512, 256, 128),
         activation="elu",
         obs_normalization=False,
@@ -21,7 +21,7 @@ def astro_getup_ppo_runner_cfg() -> MjpOnPolicyRunnerCfg:
             "std_type": "log",
         },
     )
-    critic: MjpModelCfg = MjpModelCfg(
+    critic: MjPgModelCfg = MjPgModelCfg(
         hidden_dims=(512, 256, 128),
         activation="elu",
         obs_normalization=True,
@@ -31,7 +31,7 @@ def astro_getup_ppo_runner_cfg() -> MjpOnPolicyRunnerCfg:
         lambda_l2c2=0.1,
         clean_obs_suffix="_clean",
     )
-    algorithm: MjpPpoAlgorithmCfg = MjpPpoAlgorithmCfg(
+    algorithm: MjPgPpoAlgorithmCfg = MjPgPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
@@ -47,7 +47,7 @@ def astro_getup_ppo_runner_cfg() -> MjpOnPolicyRunnerCfg:
         l2c2_cfg=l2c2,
     )
 
-    return MjpOnPolicyRunnerCfg(
+    return MjPgOnPolicyRunnerCfg(
         actor=actor,
         critic=critic,
         algorithm=algorithm,

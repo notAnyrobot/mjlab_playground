@@ -9,7 +9,7 @@ from pathlib import Path
 import mjlab_playground.rl_extensions.algorithms.ppo as ppo_mod
 import pytest
 import torch
-from mjlab_playground.rl_extensions import MjpOnPolicyRunnerCfg, MjpPpo
+from mjlab_playground.rl_extensions import MjPgOnPolicyRunnerCfg, MjPgPpo
 from mjlab_playground.rl_extensions.l2c2 import L2C2, L2C2Cfg, resolve_l2c2_config
 from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
@@ -27,8 +27,8 @@ def _name(node: ast.AST) -> str | None:
     return None
 
 
-def _minimal_mjpppo() -> MjpPpo:
-    alg = object.__new__(MjpPpo)
+def _minimal_mjpgppo() -> MjPgPpo:
+    alg = object.__new__(MjPgPpo)
     alg.clip_param = 0.2
     alg.use_clipped_value_loss = True
     alg.value_loss_coef = 2.0
@@ -80,12 +80,12 @@ def test_l2c2_package_does_not_reexport_normalization_helper() -> None:
 
 
 def test_compute_losses_returns_plain_ppo_losses() -> None:
-    alg = _minimal_mjpppo()
+    alg = _minimal_mjpgppo()
     batch = _loss_batch()
     actions_log_prob = torch.tensor([0.1, -0.2])
     values = torch.tensor([[0.7], [0.3]])
     entropy = torch.tensor([0.3, 0.7])
-    context = ppo_mod.MjpPpoLossContext(
+    context = ppo_mod.MjPgPpoLossContext(
         batch=batch,
         original_batch_size=2,
         actions_log_prob=actions_log_prob,
@@ -132,10 +132,10 @@ def test_compute_losses_keeps_rnd_loss_separate_from_ppo_loss() -> None:
             assert observations.batch_size == torch.Size([2])
             return torch.tensor(3.0)
 
-    alg = _minimal_mjpppo()
+    alg = _minimal_mjpgppo()
     alg.rnd = DummyRnd()
     batch = _loss_batch()
-    context = ppo_mod.MjpPpoLossContext(
+    context = ppo_mod.MjPgPpoLossContext(
         batch=batch,
         original_batch_size=2,
         actions_log_prob=torch.tensor([0.1, -0.2]),
@@ -143,7 +143,7 @@ def test_compute_losses_keeps_rnd_loss_separate_from_ppo_loss() -> None:
         entropy=torch.tensor([0.3, 0.7]),
     )
 
-    without_rnd = _minimal_mjpppo().compute_losses(context)
+    without_rnd = _minimal_mjpgppo().compute_losses(context)
     losses = alg.compute_losses(context)
 
     torch.testing.assert_close(losses.ppo_loss, without_rnd.ppo_loss)
@@ -168,21 +168,21 @@ def test_compute_losses_adds_symmetry_only_when_mirror_loss_enabled() -> None:
             return torch.tensor(4.0)
 
     sentinel_actor = object()
-    context = ppo_mod.MjpPpoLossContext(
+    context = ppo_mod.MjPgPpoLossContext(
         batch=_loss_batch(),
         original_batch_size=2,
         actions_log_prob=torch.tensor([0.1, -0.2]),
         values=torch.tensor([[0.7], [0.3]]),
         entropy=torch.tensor([0.3, 0.7]),
     )
-    base_loss = _minimal_mjpppo().compute_losses(context).ppo_loss
+    base_loss = _minimal_mjpgppo().compute_losses(context).ppo_loss
 
-    logging_alg = _minimal_mjpppo()
+    logging_alg = _minimal_mjpgppo()
     logging_alg.actor = sentinel_actor
     logging_alg.symmetry = DummySymmetry(use_mirror_loss=False)
     logging_losses = logging_alg.compute_losses(context)
 
-    learning_alg = _minimal_mjpppo()
+    learning_alg = _minimal_mjpgppo()
     learning_alg.actor = sentinel_actor
     learning_alg.symmetry = DummySymmetry(use_mirror_loss=True)
     learning_losses = learning_alg.compute_losses(context)
@@ -214,15 +214,15 @@ def test_compute_losses_adds_weighted_l2c2_loss_when_enabled() -> None:
             )()
 
     sentinel_actor = object()
-    context = ppo_mod.MjpPpoLossContext(
+    context = ppo_mod.MjPgPpoLossContext(
         batch=_loss_batch(),
         original_batch_size=2,
         actions_log_prob=torch.tensor([0.1, -0.2]),
         values=torch.tensor([[0.7], [0.3]]),
         entropy=torch.tensor([0.3, 0.7]),
     )
-    disabled_losses = _minimal_mjpppo().compute_losses(context)
-    enabled_alg = _minimal_mjpppo()
+    disabled_losses = _minimal_mjpgppo().compute_losses(context)
+    enabled_alg = _minimal_mjpgppo()
     enabled_alg.actor = sentinel_actor
     enabled_alg.l2c2 = DummyL2C2()
 
@@ -263,7 +263,7 @@ def test_update_delegates_loss_construction_to_compute_losses() -> None:
 
 
 def test_default_runner_obs_groups_do_not_include_l2c2_clean_actor_group() -> None:
-    cfg = MjpOnPolicyRunnerCfg()
+    cfg = MjPgOnPolicyRunnerCfg()
 
     assert cfg.obs_groups == {
         "actor": ("actor",),
@@ -271,8 +271,8 @@ def test_default_runner_obs_groups_do_not_include_l2c2_clean_actor_group() -> No
     }
 
 
-def test_l2c2_config_is_keyword_only_in_mjpppo_constructor() -> None:
-    signature = inspect.signature(MjpPpo)
+def test_l2c2_config_is_keyword_only_in_mjpgppo_constructor() -> None:
+    signature = inspect.signature(MjPgPpo)
 
     assert signature.parameters["l2c2_cfg"].kind is inspect.Parameter.KEYWORD_ONLY
 

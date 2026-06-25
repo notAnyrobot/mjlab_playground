@@ -1,14 +1,14 @@
 """Modular extensions of rsl_rl."""
 
-from mjlab_playground.rl_extensions.algorithms import MjpPpo as MjpPpo
+from mjlab_playground.rl_extensions.algorithms import MjPgPpo as MjPgPpo
 from mjlab_playground.rl_extensions.config import (
-    MjpModelCfg as MjpModelCfg,
+    MjPgModelCfg as MjPgModelCfg,
 )
 from mjlab_playground.rl_extensions.config import (
-    MjpOnPolicyRunnerCfg as MjpOnPolicyRunnerCfg,
+    MjPgOnPolicyRunnerCfg as MjPgOnPolicyRunnerCfg,
 )
 from mjlab_playground.rl_extensions.config import (
-    MjpPpoAlgorithmCfg as MjpPpoAlgorithmCfg,
+    MjPgPpoAlgorithmCfg as MjPgPpoAlgorithmCfg,
 )
 
-__all__ = ["MjpModelCfg", "MjpOnPolicyRunnerCfg", "MjpPpoAlgorithmCfg"]
+__all__ = ["MjPgModelCfg", "MjPgOnPolicyRunnerCfg", "MjPgPpoAlgorithmCfg"]

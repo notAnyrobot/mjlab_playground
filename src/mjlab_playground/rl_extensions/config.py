@@ -9,12 +9,12 @@ from mjlab_playground.rl_extensions.l2c2 import L2C2Cfg
 
 
 @dataclass
-class MjpModelCfg(RslRlModelCfg):
+class MjPgModelCfg(RslRlModelCfg):
     pass
 
 
 @dataclass
-class MjpPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+class MjPgPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     """Config of PPO algorithm."""
 
     l2c2_cfg: L2C2Cfg | None = field(default_factory=L2C2Cfg)
@@ -26,12 +26,12 @@ class MjpPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     symmetry_cfg: dict[str, Any] | None = None
     """Optional RSL-RL symmetry augmentation config."""
 
-    class_name: str = "mjlab_playground.rl_extensions.MjpPpo"
-    """Algorithm class name resolved to MjpPpo by RSL-RL."""
+    class_name: str = "mjlab_playground.rl_extensions.MjPgPpo"
+    """Algorithm class name resolved to MjPgPpo by RSL-RL."""
 
 
 @dataclass
-class MjpOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
+class MjPgOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     obs_groups: dict[str, tuple[str, ...]] = field(
         default_factory=lambda: {

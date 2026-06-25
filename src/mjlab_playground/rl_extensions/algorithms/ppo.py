@@ -26,8 +26,8 @@ from mjlab_playground.rl_extensions.l2c2 import L2C2, resolve_l2c2_config
 
 
 @dataclass
-class MjpPpoLosses:
-    """Container for the losses of the MjpRlPpo algorithm."""
+class MjPgPpoLosses:
+    """Container for the losses of the MjPgPpo algorithm."""
 
     ppo_loss: torch.Tensor
     """The PPO loss used for the actor/critic optimizer."""
@@ -52,7 +52,7 @@ class MjpPpoLosses:
 
 
 @dataclass
-class MjpPpoLossContext:
+class MjPgPpoLossContext:
     """Inputs needed to compute losses for one PPO mini-batch."""
 
     batch: RolloutStorage.Batch
@@ -71,7 +71,7 @@ class MjpPpoLossContext:
     """Current actor entropy for original samples."""
 
 
-class MjpPpo(PPO):
+class MjPgPpo(PPO):
     def __init__(
         self,
         actor: MLPModel,
@@ -90,7 +90,7 @@ class MjpPpo(PPO):
             self.l2c2 = L2C2(device=self.device, **l2c2_cfg)
             self.l2c2.validate_models(actor, critic)
 
-    def compute_losses(self, context: MjpPpoLossContext) -> MjpPpoLosses:
+    def compute_losses(self, context: MjPgPpoLossContext) -> MjPgPpoLosses:
         """Compute PPO loss components for one mini-batch."""
         batch = context.batch
 
@@ -129,7 +129,7 @@ class MjpPpo(PPO):
             l2c2_loss = l2c2_result.weighted
             ppo_loss = ppo_loss + l2c2_loss
 
-        return MjpPpoLosses(
+        return MjPgPpoLosses(
             ppo_loss=ppo_loss,
             surrogate_loss=surrogate_loss,
             value_loss=value_loss,
@@ -214,7 +214,7 @@ class MjpPpo(PPO):
                         param_group["lr"] = self.learning_rate
 
             losses = self.compute_losses(
-                MjpPpoLossContext(
+                MjPgPpoLossContext(
                     batch=batch,
                     original_batch_size=original_batch_size,
                     actions_log_prob=actions_log_prob,
