@@ -12,6 +12,8 @@ MJLAB_ROOT = ROOT.parent / "mjlab"
 CONTAINER_MJLAB_ROOT = "/workspace/mujocolab/mjlab"
 CONTAINER_PLAYGROUND_ROOT = "/workspace/mujocolab/mjlab_playground"
 PYTHONPATH_VALUE = f"{CONTAINER_MJLAB_ROOT}/src:{CONTAINER_PLAYGROUND_ROOT}/src"
+WS_DATASET_ROOT = "/media/android/data/motion_datasets"
+HPC_DATASET_ROOT = "/data/share/motion_datasets"
 WS_LAUNCHER = ROOT / "scripts" / "launch_docker_ws.sh"
 HPC_LAUNCHER = ROOT / "scripts" / "launch_docker_hpc.sh"
 COMMON_LAUNCHER = ROOT / "scripts" / "_docker_launcher_common.sh"
@@ -123,6 +125,8 @@ def test_ws_print_config_uses_playground_defaults() -> None:
   assert f"mjlab_root:         {MJLAB_ROOT}" in result.stdout
   assert f"container_workdir:  {CONTAINER_PLAYGROUND_ROOT}" in result.stdout
   assert f"mjlab_container:    {CONTAINER_MJLAB_ROOT}" in result.stdout
+  assert f"dataset_root:       {WS_DATASET_ROOT}" in result.stdout
+  assert "dataset_readonly:   1" in result.stdout
   assert f"pythonpath:         {PYTHONPATH_VALUE}" in result.stdout
   assert "gpus:               all" in result.stdout
   assert "published_port:     8080 -> 8080" in result.stdout
@@ -171,6 +175,8 @@ def test_hpc_print_config_uses_hpc_runtime_label() -> None:
   assert f"mjlab_root:         {MJLAB_ROOT}" in result.stdout
   assert f"container_workdir:  {CONTAINER_PLAYGROUND_ROOT}" in result.stdout
   assert f"mjlab_container:    {CONTAINER_MJLAB_ROOT}" in result.stdout
+  assert f"dataset_root:       {HPC_DATASET_ROOT}" in result.stdout
+  assert "dataset_readonly:   1" in result.stdout
   assert "runtime:            hpc" in result.stdout
   assert "gpu_mode:           manual" in result.stdout
 
@@ -199,6 +205,66 @@ def test_print_config_accepts_mjlab_repo_root_override(tmp_path: Path) -> None:
   assert f"mjlab_root:         {mjlab_root}" in result.stdout
 
 
+def test_print_config_accepts_short_mjpg_aliases(tmp_path: Path) -> None:
+  mjlab_root = tmp_path / "custom-mjlab"
+  mjlab_root.mkdir()
+  (mjlab_root / "pyproject.toml").write_text(
+    "[project]\nname = \"mjlab\"\nversion = \"0.0.0\"\n",
+    encoding="utf-8",
+  )
+  dataset_root = tmp_path / "motion_datasets"
+  env = os.environ.copy()
+  env.update(
+    {
+      "MJPG_IMAGE": "custom-image:latest",
+      "MJPG_MJLAB_REPO_ROOT": str(mjlab_root),
+      "MJPG_PORT": "18080",
+      "MJPG_GPU_MODE": "none",
+      "MJPG_GPUS": "none",
+      "MJPG_DATASET_ROOT": str(dataset_root),
+      "MJPG_DATASET_READONLY": "0",
+    }
+  )
+
+  result = subprocess.run(
+    [str(WS_LAUNCHER), "print-config"],
+    cwd=ROOT,
+    env=env,
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "image:              custom-image:latest" in result.stdout
+  assert f"mjlab_root:         {mjlab_root}" in result.stdout
+  assert f"dataset_root:       {dataset_root}" in result.stdout
+  assert "dataset_readonly:   0" in result.stdout
+  assert "gpu_mode:           none" in result.stdout
+  assert "gpus:               none" in result.stdout
+  assert "published_port:     18080 -> 8080" in result.stdout
+
+
+def test_short_mjpg_aliases_take_precedence_over_long_names(tmp_path: Path) -> None:
+  result = run_launcher(
+    WS_LAUNCHER,
+    ["run", "python", "-c", "print('ok')"],
+    tmp_path,
+    {
+      "MJPG_GPUS": "none",
+      "MJLAB_PLAYGROUND_GPUS": "device=0",
+      "MJPG_PORT": "18080",
+      "MJLAB_PLAYGROUND_PORT": "28080",
+    },
+  )
+  assert result.returncode == 0, result.stderr
+  call = docker_call_text(tmp_path)
+  assert "--gpus" not in call
+  assert "--publish\n18080:8080\n" in call
+  assert "--publish\n28080:8080\n" not in call
+
+
 def test_nvidia_smi_invokes_docker_with_mount_env_and_gpu_args(tmp_path: Path) -> None:
   result = run_launcher(
     WS_LAUNCHER,
@@ -223,6 +289,10 @@ def test_nvidia_smi_invokes_docker_with_mount_env_and_gpu_args(tmp_path: Path) -
   assert f"--mount\ntype=bind,source={MJLAB_ROOT},target={CONTAINER_MJLAB_ROOT}\n" in call
   assert (
     f"--mount\ntype=bind,source={ROOT},target={CONTAINER_PLAYGROUND_ROOT}\n" in call
+  )
+  assert (
+    f"--mount\ntype=bind,source={WS_DATASET_ROOT},target={WS_DATASET_ROOT},readonly\n"
+    in call
   )
   assert "--publish\n18080:8080\n" in call
   assert "mjlab-playground:cuda128-dev\n" in call
@@ -269,6 +339,27 @@ def test_hpc_launcher_can_use_docker_gpus_when_requested(tmp_path: Path) -> None
   call = docker_call_text(tmp_path)
   assert "--gpus\ndevice=0\n" in call
   assert "--device=" not in call
+
+
+def test_dataset_mount_can_be_overridden_and_made_writable(tmp_path: Path) -> None:
+  dataset_root = tmp_path / "motion_datasets"
+  result = run_launcher(
+    WS_LAUNCHER,
+    ["run", "python", "-c", "print('ok')"],
+    tmp_path,
+    {
+      "MJLAB_PLAYGROUND_DATASET_ROOT": str(dataset_root),
+      "MJLAB_PLAYGROUND_DATASET_READONLY": "0",
+      "MJLAB_PLAYGROUND_GPUS": "none",
+    },
+  )
+  assert result.returncode == 0, result.stderr
+  call = docker_call_text(tmp_path)
+  assert (
+    f"--mount\ntype=bind,source={dataset_root},target={dataset_root}\n"
+    in call
+  )
+  assert f"source={dataset_root},target={dataset_root},readonly" not in call
 
 
 def test_home_and_cache_overrides_mount_to_container_runtime_dirs(
@@ -337,7 +428,8 @@ def test_help_does_not_start_docker(tmp_path: Path) -> None:
   result = run_launcher(HPC_LAUNCHER, ["help"], tmp_path)
   assert result.returncode == 0, result.stderr
   assert "Usage:" in result.stdout
-  assert "MJLAB_PLAYGROUND_GPU_MODE" in result.stdout
+  assert "MJPG_GPU_MODE" in result.stdout
+  assert "MJLAB_PLAYGROUND_* names remain supported" in result.stdout
   assert not (tmp_path / "docker-args.txt").exists()
 
 

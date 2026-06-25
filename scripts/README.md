@@ -10,12 +10,15 @@ the docs.
 - `launch_docker_ws.sh`: workstation launcher. It defaults to
   `MJLAB_PLAYGROUND_GPU_MODE=gpus` and uses Docker's native `--gpus` support.
 - `launch_docker_hpc.sh`: HPC launcher. It defaults to
-  `MJLAB_PLAYGROUND_GPU_MODE=manual` for rootless Docker and passes NVIDIA
+  `MJPG_GPU_MODE=manual` for rootless Docker and passes NVIDIA
   devices and exact driver files through by bind mount.
 - `_docker_launcher_common.sh`: shared launcher implementation. Do not run this
   file directly.
 - `sync_codebase.sh`: rsync helper for the `mjlab_playground` checkout on
   HPC-1. It does not sync the sibling `mjlab` checkout.
+- `batch_convert_pyroki_to_gmr.sh`: converts all direct Astro PyRoki-retargeted
+  AMASS splits under the mounted dataset root into sibling `gmr-astro`
+  directories.
 - `docker_uv_sync_locked.sh`: image-build helper used by `Dockerfile` to keep
   locked `uv sync` behavior consistent when a package mirror is configured.
 
@@ -55,8 +58,8 @@ cd /data/atom7/Code/mujocolab/mjlab_playground
 The HPC launcher defaults to:
 
 ```bash
-MJLAB_PLAYGROUND_GPU_MODE=manual
-MJLAB_PLAYGROUND_GPUS=all
+MJPG_GPU_MODE=manual
+MJPG_GPUS=all
 ```
 
 Manual mode avoids Docker's NVIDIA prestart hook, which fails on the validated
@@ -64,7 +67,7 @@ rootless host with a cgroup device-filter error. If another host supports normal
 NVIDIA Docker, opt in explicitly:
 
 ```bash
-MJLAB_PLAYGROUND_GPU_MODE=gpus ./scripts/launch_docker_hpc.sh nvidia-smi
+MJPG_GPU_MODE=gpus ./scripts/launch_docker_hpc.sh nvidia-smi
 ```
 
 ## Image And Source Sync
@@ -109,17 +112,17 @@ Docker visibility and `mjlab` training device selection are separate.
 Expose all GPUs to the container:
 
 ```bash
-MJLAB_PLAYGROUND_GPUS=all ./scripts/launch_docker_hpc.sh shell
+MJPG_GPUS=all ./scripts/launch_docker_hpc.sh shell
 ```
 
 Expose GPU 0 only:
 
 ```bash
-MJLAB_PLAYGROUND_GPUS=0 ./scripts/launch_docker_hpc.sh shell
+MJPG_GPUS=0 ./scripts/launch_docker_hpc.sh shell
 ```
 
 In manual mode, comma-separated physical IDs are remapped to container-local
-CUDA IDs. For example, `MJLAB_PLAYGROUND_GPUS=2,3` exposes those physical
+CUDA IDs. For example, `MJPG_GPUS=2,3` exposes those physical
 devices and sets `CUDA_VISIBLE_DEVICES=0,1` inside the container.
 
 For multi-GPU training, pass the training flag too:
@@ -158,6 +161,72 @@ The baked environment uses `UV_NO_SYNC=1` and
 `UV_PROJECT_ENVIRONMENT=/app/.venv`; it is not intended to resync dependencies
 inside a running container.
 
+## Dataset Mount
+
+The launchers mount the same `motion_datasets` roots used by the ProtoMotions
+Newton/PyRoki container, at the same absolute path inside the container:
+
+```bash
+# Workstation default
+/media/android/data/motion_datasets
+
+# HPC default
+/data/share/motion_datasets
+```
+
+The dataset mount is read-only by default, which is the expected mode for policy
+learning from reference motion data. Use a writable mount only for explicit data
+generation or conversion jobs:
+
+```bash
+MJPG_DATASET_READONLY=0 ./scripts/launch_docker_ws.sh shell
+MJPG_DATASET_READONLY=0 ./scripts/launch_docker_hpc.sh shell
+```
+
+Override the dataset root only when the host uses a different shared path:
+
+```bash
+MJPG_DATASET_ROOT=/path/to/motion_datasets ./scripts/launch_docker_ws.sh shell
+```
+
+The longer `MJLAB_PLAYGROUND_*` environment names remain supported for existing
+scripts. Prefer the shorter `MJPG_*` aliases for manual commands; if both forms
+are set, `MJPG_*` wins.
+
+## Motion Conversion
+
+Launch the container with a writable dataset mount before generating GMR data:
+
+```bash
+MJPG_DATASET_READONLY=0 MJPG_GPUS=0 MJPG_PORT=18080 ./scripts/launch_docker_hpc.sh shell
+```
+
+Inside the container, convert every direct Astro split that contains
+`pyroki-retargeted-astro`:
+
+```bash
+scripts/batch_convert_pyroki_to_gmr.sh --fps 30
+```
+
+The script writes beside the PyRoki source-of-truth directory for each split:
+
+```text
+/data/share/motion_datasets/protomotions/astro/<split>/pyroki-retargeted-astro
+/data/share/motion_datasets/protomotions/astro/<split>/gmr-astro
+```
+
+It refuses to overwrite existing `.pkl` files unless requested:
+
+```bash
+scripts/batch_convert_pyroki_to_gmr.sh --fps 30 --force-remake
+```
+
+For a subset validation run, pass one or more direct child split names:
+
+```bash
+scripts/batch_convert_pyroki_to_gmr.sh --fps 30 --split dancedb --split accad
+```
+
 ## Logs And Artifacts
 
 The launchers mount the repo root, so these directories persist on the host:
@@ -177,7 +246,7 @@ Use TensorBoard for unattended HPC runs unless W&B is already logged in:
 ## Troubleshooting
 
 - If rootless Docker fails with `bpf_prog_query(BPF_CGROUP_DEVICE)`, keep
-  `MJLAB_PLAYGROUND_GPU_MODE=manual`.
+  `MJPG_GPU_MODE=manual`.
 - If `/bin/bash` fails with GLIBC version errors, do not mount a full host
   library directory. The launcher should mount only exact NVIDIA files into
   `/usr/local/cuda/compat`.

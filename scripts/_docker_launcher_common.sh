@@ -5,27 +5,41 @@ set -eu
 : "${MJLAB_PLAYGROUND_REPO_ROOT:?MJLAB_PLAYGROUND_REPO_ROOT is required}"
 : "${MJLAB_PLAYGROUND_RUNTIME:?MJLAB_PLAYGROUND_RUNTIME is required}"
 
-IMAGE="${MJLAB_PLAYGROUND_IMAGE:-mjlab-playground:cuda128-dev}"
+IMAGE="${MJPG_IMAGE:-${MJLAB_PLAYGROUND_IMAGE:-mjlab-playground:cuda128-dev}}"
 CONTAINER_MJLAB_ROOT="${MJLAB_CONTAINER_ROOT:-/workspace/mujocolab/mjlab}"
-CONTAINER_WORKDIR="${MJLAB_PLAYGROUND_CONTAINER_WORKDIR:-/workspace/mujocolab/mjlab_playground}"
-GPUS="${MJLAB_PLAYGROUND_GPUS:-all}"
-if [ -n "${MJLAB_PLAYGROUND_GPU_MODE:-}" ]; then
+CONTAINER_WORKDIR="${MJPG_CONTAINER_WORKDIR:-${MJLAB_PLAYGROUND_CONTAINER_WORKDIR:-/workspace/mujocolab/mjlab_playground}}"
+GPUS="${MJPG_GPUS:-${MJLAB_PLAYGROUND_GPUS:-all}}"
+if [ -n "${MJPG_GPU_MODE:-}" ]; then
+  GPU_MODE="$MJPG_GPU_MODE"
+elif [ -n "${MJLAB_PLAYGROUND_GPU_MODE:-}" ]; then
   GPU_MODE="$MJLAB_PLAYGROUND_GPU_MODE"
 elif [ "$MJLAB_PLAYGROUND_RUNTIME" = "hpc" ]; then
   GPU_MODE="manual"
 else
   GPU_MODE="gpus"
 fi
-PORT="${MJLAB_PLAYGROUND_PORT:-8080}"
-HOST_HOME="${MJLAB_PLAYGROUND_CONTAINER_HOME:-$MJLAB_PLAYGROUND_REPO_ROOT/.container_home}"
-HOST_CACHE="${MJLAB_PLAYGROUND_CONTAINER_CACHE:-$MJLAB_PLAYGROUND_REPO_ROOT/.container_cache}"
+PORT="${MJPG_PORT:-${MJLAB_PLAYGROUND_PORT:-8080}}"
+HOST_HOME="${MJPG_CONTAINER_HOME:-${MJLAB_PLAYGROUND_CONTAINER_HOME:-$MJLAB_PLAYGROUND_REPO_ROOT/.container_home}}"
+HOST_CACHE="${MJPG_CONTAINER_CACHE:-${MJLAB_PLAYGROUND_CONTAINER_CACHE:-$MJLAB_PLAYGROUND_REPO_ROOT/.container_cache}}"
 HOST_USER="${USER:-mjlab}"
 PYTHONPATH_VALUE="$CONTAINER_MJLAB_ROOT/src:$CONTAINER_WORKDIR/src"
-HPC_DEV_DIR="${MJLAB_PLAYGROUND_HPC_DEV_DIR:-/dev}"
-HPC_NVIDIA_LIBS="${MJLAB_PLAYGROUND_HPC_NVIDIA_LIBS:-}"
-HPC_NVIDIA_SMI="${MJLAB_PLAYGROUND_HPC_NVIDIA_SMI:-/usr/bin/nvidia-smi}"
+if [ -n "${MJPG_DATASET_ROOT+x}" ]; then
+  DATASET_ROOT="$MJPG_DATASET_ROOT"
+elif [ -n "${MJLAB_PLAYGROUND_DATASET_ROOT+x}" ]; then
+  DATASET_ROOT="$MJLAB_PLAYGROUND_DATASET_ROOT"
+elif [ "$MJLAB_PLAYGROUND_RUNTIME" = "hpc" ]; then
+  DATASET_ROOT="/data/share/motion_datasets"
+else
+  DATASET_ROOT="/media/android/data/motion_datasets"
+fi
+DATASET_READONLY="${MJPG_DATASET_READONLY:-${MJLAB_PLAYGROUND_DATASET_READONLY:-1}}"
+HPC_DEV_DIR="${MJPG_HPC_DEV_DIR:-${MJLAB_PLAYGROUND_HPC_DEV_DIR:-/dev}}"
+HPC_NVIDIA_LIBS="${MJPG_HPC_NVIDIA_LIBS:-${MJLAB_PLAYGROUND_HPC_NVIDIA_LIBS:-}}"
+HPC_NVIDIA_SMI="${MJPG_HPC_NVIDIA_SMI:-${MJLAB_PLAYGROUND_HPC_NVIDIA_SMI:-/usr/bin/nvidia-smi}}"
 
-if [ -z "${MJLAB_REPO_ROOT:-}" ]; then
+if [ -n "${MJPG_MJLAB_REPO_ROOT:-}" ]; then
+  MJLAB_REPO_ROOT=$(CDPATH= cd "$MJPG_MJLAB_REPO_ROOT" && pwd -P)
+elif [ -z "${MJLAB_REPO_ROOT:-}" ]; then
   MJLAB_REPO_ROOT=$(CDPATH= cd "$MJLAB_PLAYGROUND_REPO_ROOT/../mjlab" && pwd -P)
 else
   MJLAB_REPO_ROOT=$(CDPATH= cd "$MJLAB_REPO_ROOT" && pwd -P)
@@ -65,14 +79,19 @@ Commands:
   help          Show this message.
 
 Common overrides:
-  MJLAB_PLAYGROUND_IMAGE           Container image tag.
-  MJLAB_REPO_ROOT                  Host sibling mjlab checkout.
-  MJLAB_PLAYGROUND_PORT            Host port published to container port 8080.
-  MJLAB_PLAYGROUND_GPU_MODE        gpus, manual, or none.
-  MJLAB_PLAYGROUND_GPUS            all, none, device=N, or comma-separated GPU IDs.
-  MJLAB_PLAYGROUND_HPC_DEV_DIR     Device directory for manual HPC GPU mode.
-  MJLAB_PLAYGROUND_HPC_NVIDIA_LIBS Optional host directory for NVIDIA driver libraries.
-  MJLAB_PLAYGROUND_HPC_NVIDIA_SMI  Host nvidia-smi path for manual mode.
+  MJPG_IMAGE                       Container image tag.
+  MJPG_MJLAB_REPO_ROOT             Host sibling mjlab checkout.
+  MJPG_PORT                        Host port published to container port 8080.
+  MJPG_GPU_MODE                    gpus, manual, or none.
+  MJPG_GPUS                        all, none, device=N, or comma-separated GPU IDs.
+  MJPG_HPC_DEV_DIR                 Device directory for manual HPC GPU mode.
+  MJPG_HPC_NVIDIA_LIBS             Optional host directory for NVIDIA driver libraries.
+  MJPG_HPC_NVIDIA_SMI              Host nvidia-smi path for manual mode.
+  MJPG_DATASET_ROOT                Host dataset root mounted at the same absolute path.
+  MJPG_DATASET_READONLY            1 for read-only dataset mount, 0 for writable.
+
+Long MJLAB_PLAYGROUND_* names remain supported for compatibility. MJPG_* wins
+when both forms are set.
 EOF
 }
 
@@ -231,6 +250,18 @@ build_gpu_args() {
   esac
 }
 
+dataset_mount_arg() {
+  if [ -z "$DATASET_ROOT" ]; then
+    return 0
+  fi
+
+  mount_arg="type=bind,source=$DATASET_ROOT,target=$DATASET_ROOT"
+  if [ "$DATASET_READONLY" != "0" ]; then
+    mount_arg="$mount_arg,readonly"
+  fi
+  printf '%s\n' "$mount_arg"
+}
+
 print_config() {
   cat <<EOF
 image:              $IMAGE
@@ -238,6 +269,8 @@ repo_root:          $MJLAB_PLAYGROUND_REPO_ROOT
 mjlab_root:         $MJLAB_REPO_ROOT
 container_workdir:  $CONTAINER_WORKDIR
 mjlab_container:    $CONTAINER_MJLAB_ROOT
+dataset_root:       ${DATASET_ROOT:-not mounted}
+dataset_readonly:   $DATASET_READONLY
 runtime:            $MJLAB_PLAYGROUND_RUNTIME
 gpu_mode:           $GPU_MODE
 gpus:               $GPUS
@@ -289,6 +322,7 @@ run_container() {
     --mount type=bind,source="$MJLAB_PLAYGROUND_REPO_ROOT",target="$CONTAINER_WORKDIR" \
     --mount type=bind,source="$HOST_HOME",target="$CONTAINER_WORKDIR/.container_home" \
     --mount type=bind,source="$HOST_CACHE",target="$CONTAINER_WORKDIR/.container_cache" \
+    ${DATASET_ROOT:+--mount "$(dataset_mount_arg)"} \
     $GPU_MOUNT_ARGS \
     --publish "$PORT:8080" \
     "$IMAGE" \
