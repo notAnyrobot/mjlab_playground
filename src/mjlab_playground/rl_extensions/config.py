@@ -1,5 +1,7 @@
 """Extension configuration for the RL algorithms."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -7,10 +9,20 @@ from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 from mjlab_playground.rl_extensions.l2c2 import L2C2Cfg
 
+MjPgModelClassName = Literal[
+    "MLPModel",
+    "CNNModel",
+    "RNNModel",
+    "mjlab_playground.rl_extensions.temporal_cnn:TemporalCNNModel",
+]
+
 
 @dataclass
 class MjPgModelCfg(RslRlModelCfg):
-    pass
+    """Model config with playground-specific class-name options."""
+
+    class_name: MjPgModelClassName = "MLPModel"
+    """Model class name resolved by RSL-RL."""
 
 
 @dataclass
@@ -32,6 +44,21 @@ class MjPgPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
 @dataclass
 class MjPgOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
+
+    actor: RslRlModelCfg = field(
+        default_factory=lambda: MjPgModelCfg(
+            distribution_cfg={
+                "class_name": "GaussianDistribution",
+                "init_std": 1.0,
+                "std_type": "scalar",
+            },
+            cnn_cfg=None,
+        )
+    )
+    """The actor model configuration."""
+
+    critic: RslRlModelCfg = field(default_factory=MjPgModelCfg)
+    """The critic model configuration."""
 
     obs_groups: dict[str, tuple[str, ...]] = field(
         default_factory=lambda: {
