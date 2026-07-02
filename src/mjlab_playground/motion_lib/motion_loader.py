@@ -20,6 +20,7 @@ class ReferenceMotionState:
     root_rot: torch.Tensor
     dof_pos: torch.Tensor
     name: str | None = None
+    display_name: str | None = None
     fps: float = 30.0
     root_lin_vel: torch.Tensor | None = None
     root_ang_vel: torch.Tensor | None = None
@@ -132,11 +133,23 @@ class PyrokiMotionLoader(MotionLoader):
 
         return ReferenceMotionState(
             name=motion_path.name,
+            display_name=self._display_name(motion_path.name),
             fps=self.fps,
             root_pos=self._to_float32_tensor(root_pos),
             root_rot=self._to_float32_tensor(root_rot),
             dof_pos=self._to_float32_tensor(dof_pos),
         )
+
+    @staticmethod
+    def _display_name(name: str) -> str:
+        suffixes = (
+            "_poses_keypoints_retargeted.npz",
+            ".npz",
+        )
+        for suffix in suffixes:
+            if name.endswith(suffix):
+                return name[: -len(suffix)]
+        return name
 
     @staticmethod
     def _load_array(

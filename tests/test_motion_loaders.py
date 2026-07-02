@@ -59,6 +59,7 @@ def test_pyroki_motion_loader_loads_single_npz_into_reference_motion_state(
     assert len(motions) == 1
     motion = motions[0]
     assert motion.name == "motion.npz"
+    assert motion.display_name == "motion"
     assert motion.fps == 50.0
     assert motion.root_pos.dtype == torch.float32
     assert motion.root_rot.dtype == torch.float32

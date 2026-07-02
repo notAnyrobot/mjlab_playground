@@ -47,4 +47,4 @@ dev = [
 ]
 
 [project.entry-points."mjlab.tasks"]
-mjlab_playground = "mjlab_playground"
+mjlab_playground = "mjlab_playground.tasks"

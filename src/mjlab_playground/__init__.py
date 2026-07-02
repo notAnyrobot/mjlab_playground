@@ -1,7 +1,11 @@
-"""A collection of tasks built on mjlab."""
+"""Repository-local extensions and tasks built on mjlab."""
 
+import sys
 from pathlib import Path
 
 MJLAB_PLAYGROUND_SRC_PATH: Path = Path(__file__).parent
 
-from mjlab_playground.tasks import *  # noqa: E402, F401, F403
+__all__ = ["MJLAB_PLAYGROUND_SRC_PATH"]
+
+if "mjlab" in sys.modules:
+    from mjlab_playground import tasks as tasks  # noqa: F401
