@@ -12,11 +12,13 @@ wheels/
 # Local agent/session metadata
 .agents/
 .codex/
+.superpowers/
 
 # AI-generated local study artifacts
 MISSION.md
 NOTES.md
 RESOURCES.md
+assets/
 reference/
 lessons/
 
@@ -45,6 +47,7 @@ data/
 .mypy_cache/
 
 # Misc
+.scratch/
 .vscode/
 .worktrees/
 docs/superpowers/

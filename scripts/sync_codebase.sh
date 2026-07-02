@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-REMOTE_HOST="atom7@192.168.24.9"
+REMOTE_HOST="atom7@172.16.9.7"
 REMOTE_ROOT="/data/atom7/Code/mujocolab"
 REMOTE_REPO="mjlab_playground"
 REMOTE="${REMOTE_HOST}:${REMOTE_ROOT}/${REMOTE_REPO}"

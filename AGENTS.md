@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues for `notAnyrobot/mjlab_playground`. See `docs/agents/issue-tracker.md`.
+Issues and PRDs are tracked as local markdown under `.scratch/`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
