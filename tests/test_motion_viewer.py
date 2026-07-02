@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from mjlab_playground.motion_lib.motion_viewer import (
     PLAYBACK_SPEEDS,
     MotionViewer,
     PlaybackController,
+    TerminalStatusReporter,
 )
 from mjlab_playground.motion_lib.recording import RecordingAttachment
 
@@ -304,6 +306,81 @@ def test_motion_viewer_interactive_loop_applies_frames_and_syncs_passive_viewer(
     ]
     assert handle.sync_calls == 3
     assert handle.closed is True
+
+
+def test_motion_viewer_configures_passive_viewer_handle_before_playback_sync() -> None:
+    motion = FakeReferenceMotion(frame_count=1, marker=1.0)
+    scene_adapter = FakeSceneAdapter()
+    viewer = MotionViewer([motion], scene_adapter)
+    handle = FakeViewerHandle(running_checks=1)
+    events: list[str] = []
+
+    def launch_passive(model, data, *, key_callback, show_left_ui, show_right_ui):
+        events.append("launch")
+        return handle
+
+    def configure_handle(viewer_handle) -> None:
+        assert viewer_handle is handle
+        events.append("configure")
+
+    original_sync_display_data = scene_adapter.sync_display_data
+
+    def sync_display_data() -> None:
+        events.append("sync-display")
+        original_sync_display_data()
+
+    scene_adapter.sync_display_data = sync_display_data
+
+    viewer.run_interactive(
+        launch_passive=launch_passive,
+        clock=lambda: 10.0,
+        sleep=lambda _: None,
+        viewer_handle_configurator=configure_handle,
+    )
+
+    assert events == ["launch", "configure", "sync-display"]
+
+
+def test_motion_viewer_appends_viewer_handle_status_suffix() -> None:
+    motion = FakeReferenceMotion(frame_count=1, marker=1.0)
+    viewer = MotionViewer([motion], FakeSceneAdapter())
+    handle = FakeViewerHandle(running_checks=1)
+    status_updates: list[str] = []
+
+    viewer.run_interactive(
+        launch_passive=lambda *_, **__: handle,
+        clock=lambda: 10.0,
+        sleep=lambda _: None,
+        status_reporter=status_updates.append,
+        viewer_handle_status_provider=lambda viewer_handle: (
+            "camera distance=2 elevation=-5 azimuth=20"
+            if viewer_handle is handle
+            else "wrong-handle"
+        ),
+    )
+
+    assert status_updates == [
+        "Motion 1/1 | unnamed | [--------------------] 0/1 (0.0%) "
+        "| speed 1x | playing | camera distance=2 elevation=-5 azimuth=20"
+    ]
+
+
+def test_terminal_status_reporter_keeps_status_on_one_terminal_line() -> None:
+    stream = io.StringIO()
+    reporter = TerminalStatusReporter(stream=stream, max_width=80)
+    long_status = (
+        "Motion 1/32 | 20120731_StefanosTheodorou_Stefanos_1os_antrikos_"
+        "karsilamas_C3D | [===-----------------] 313/2526 (12.4%) "
+        "| speed 1x | playing | camera distance=2 elevation=-19.44 azimuth=11.94"
+    )
+
+    reporter(long_status)
+
+    rendered = stream.getvalue()
+    assert rendered.startswith("\rMotion 1/32 | ")
+    assert rendered.endswith("distance=2 elevation=-19.44 azimuth=11.94")
+    assert "\n" not in rendered
+    assert len(rendered.removeprefix("\r")) == 80
 
 
 def test_motion_viewer_recording_toggle_pauses_without_closing_viewer(

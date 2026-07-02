@@ -22,6 +22,7 @@ class FakeRobot:
     joint_names = ("hip", "knee", "ankle")
 
     def __init__(self) -> None:
+        self.indexing = SimpleNamespace(root_body_id=42)
         self.root_pose: torch.Tensor | None = None
         self.joint_pos: torch.Tensor | None = None
         self.joint_vel: torch.Tensor | None = None
@@ -192,6 +193,37 @@ def test_astro_scene_adapter_lives_outside_reusable_viewer_module() -> None:
 
     assert not hasattr(reference_viewer, "AstroMujocoSceneAdapter")
     assert not hasattr(reference_viewer, "build_scene_adapter")
+
+
+def test_astro_scene_adapter_configures_root_tracking_camera() -> None:
+    robot = FakeRobot()
+    adapter = AstroMujocoSceneAdapter(
+        scene=FakeScene(robot),
+        sim=FakeSimulation(),
+        robot=robot,
+        joint_names=("hip", "knee", "ankle"),
+        device="cpu",
+    )
+    viewer_handle = SimpleNamespace(
+        cam=SimpleNamespace(
+            type=None,
+            trackbodyid=None,
+            fixedcamid=7,
+            distance=0.0,
+            elevation=0.0,
+            azimuth=0.0,
+        )
+    )
+    camera_config = SimpleNamespace(distance=2.0, elevation=-5.0, azimuth=20.0)
+
+    adapter.configure_tracking_camera(viewer_handle, camera_config)
+
+    assert viewer_handle.cam.type == 1
+    assert viewer_handle.cam.trackbodyid == 42
+    assert viewer_handle.cam.fixedcamid == -1
+    assert viewer_handle.cam.distance == 2.0
+    assert viewer_handle.cam.elevation == -5.0
+    assert viewer_handle.cam.azimuth == 20.0
 
 
 def test_astro_scene_adapter_validates_reference_motion_dof_count() -> None:

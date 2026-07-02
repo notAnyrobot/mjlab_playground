@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -107,11 +108,13 @@ class PlaybackController:
 class TerminalStatusReporter:
     """Render playback status as a single updating terminal line."""
 
-    def __init__(self, stream: TextIO | None = None) -> None:
+    def __init__(self, stream: TextIO | None = None, max_width: int | None = None) -> None:
         self.stream = stream or sys.stdout
+        self.max_width = max_width
         self._last_status: str | None = None
 
     def __call__(self, status: str) -> None:
+        status = self._fit_status(status)
         if status == self._last_status:
             return
         padding = ""
@@ -119,6 +122,22 @@ class TerminalStatusReporter:
             padding = " " * max(0, len(self._last_status) - len(status))
         print(f"\r{status}{padding}", end="", file=self.stream, flush=True)
         self._last_status = status
+
+    def _fit_status(self, status: str) -> str:
+        max_width = self.max_width
+        if max_width is None:
+            max_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+        if max_width <= 0 or len(status) <= max_width:
+            return status
+
+        ellipsis = " ... "
+        if max_width <= len(ellipsis):
+            return status[:max_width]
+
+        min_head_width = min(16, max_width - len(ellipsis))
+        tail_width = min(48, max_width - len(ellipsis) - min_head_width)
+        head_width = max_width - len(ellipsis) - tail_width
+        return f"{status[:head_width]}{ellipsis}{status[-tail_width:]}"
 
     def close(self) -> None:
         if self._last_status is not None:
@@ -309,6 +328,8 @@ class MotionViewer:
         recording_output_paths: Sequence[Path] | None = None,
         frame_renderer_factory: Callable[[], Any] | None = None,
         recording_executor: Callable[[int, Path], Any] | None = None,
+        viewer_handle_configurator: Callable[[Any], None] | None = None,
+        viewer_handle_status_provider: Callable[[Any], str] | None = None,
     ) -> None:
         if launch_passive is None:
             import mujoco.viewer
@@ -404,6 +425,8 @@ class MotionViewer:
         )
         if handle is None:
             raise RuntimeError("Failed to launch MuJoCo viewer")
+        if viewer_handle_configurator is not None:
+            viewer_handle_configurator(handle)
 
         previous_time = clock()
         min_frame_time = 1.0 / target_refresh_rate if target_refresh_rate > 0.0 else 0.0
@@ -413,7 +436,12 @@ class MotionViewer:
                     self.render_current_frame()
                     self.scene_adapter.sync_display_data()
                     if status_reporter is not None:
-                        status_reporter(self.playback_status())
+                        status = self.playback_status()
+                        if viewer_handle_status_provider is not None:
+                            status_suffix = viewer_handle_status_provider(handle)
+                            if status_suffix:
+                                status = f"{status} | {status_suffix}"
+                        status_reporter(status)
                     handle.sync()
                     if pending_recording is not None:
                         motion_index, output_path = pending_recording

@@ -193,9 +193,9 @@ def test_offscreen_frame_renderer_uses_mjlab_renderer_and_viewer_config() -> Non
         "width": 640,
         "origin_type": "asset-root",
         "entity_name": "robot",
-        "distance": 2.0,
-        "elevation": -5.0,
-        "azimuth": 20,
+        "distance": _launch_motion_viewer.DEFAULT_CAMERA_CONFIG.distance,
+        "elevation": _launch_motion_viewer.DEFAULT_CAMERA_CONFIG.elevation,
+        "azimuth": _launch_motion_viewer.DEFAULT_CAMERA_CONFIG.azimuth,
     }
     assert calls == [
         ("init", "mj-model", cfg, "scene", "sim-model"),
@@ -276,7 +276,7 @@ def test_motion_viewer_main_reports_terminal_status_by_default(
     capsys,
 ) -> None:
     class FakeInteractiveViewer:
-        def run_interactive(self, *, status_reporter):
+        def run_interactive(self, *, status_reporter, **kwargs):
             status_reporter(
                 "Motion 1/1 | walking | [--------------------] "
                 "0/3 (0.0%) | speed 1x | playing"
@@ -291,6 +291,79 @@ def test_motion_viewer_main_reports_terminal_status_by_default(
         "\rMotion 1/1 | walking | [--------------------] "
         "0/3 (0.0%) | speed 1x | playing"
         in capsys.readouterr().out
+    )
+
+
+def test_motion_viewer_main_wires_interactive_root_tracking_camera(
+    tmp_path: Path,
+) -> None:
+    calls = {}
+    configured: list[tuple[object, object]] = []
+
+    class FakeTrackingSceneAdapter:
+        def configure_tracking_camera(self, viewer_handle, camera_config) -> None:
+            configured.append((viewer_handle, camera_config))
+
+    class FakeInteractiveViewer:
+        scene_adapter = FakeTrackingSceneAdapter()
+
+        def run_interactive(self, **kwargs):
+            calls["run_interactive"] = kwargs
+
+    _launch_motion_viewer.main(
+        ["--motion-files", str(tmp_path / "motion.npz")],
+        create_viewer=lambda *_, **__: FakeInteractiveViewer(),
+    )
+
+    run_kwargs = calls["run_interactive"]
+    assert run_kwargs["status_reporter"] is not None
+    assert run_kwargs["viewer_handle_configurator"] is not None
+
+    handle = object()
+    run_kwargs["viewer_handle_configurator"](handle)
+
+    assert configured == [(handle, _launch_motion_viewer.DEFAULT_CAMERA_CONFIG)]
+
+
+def test_viewer_handle_camera_status_reports_live_adjustable_camera_values() -> None:
+    handle = SimpleNamespace(
+        cam=SimpleNamespace(
+            distance=2.3456,
+            elevation=-5.6789,
+            azimuth=20.1234,
+        )
+    )
+
+    assert (
+        _launch_motion_viewer._viewer_handle_camera_status(handle)
+        == "camera distance=2.35 elevation=-5.68 azimuth=20.12"
+    )
+
+
+def test_motion_viewer_main_wires_interactive_camera_status_reporting(
+    tmp_path: Path,
+) -> None:
+    calls = {}
+
+    class FakeInteractiveViewer:
+        scene_adapter = FakeSceneAdapter()
+
+        def run_interactive(self, **kwargs):
+            calls["run_interactive"] = kwargs
+
+    _launch_motion_viewer.main(
+        ["--motion-files", str(tmp_path / "motion.npz")],
+        create_viewer=lambda *_, **__: FakeInteractiveViewer(),
+    )
+
+    run_kwargs = calls["run_interactive"]
+    assert run_kwargs["viewer_handle_status_provider"] is not None
+    handle = SimpleNamespace(
+        cam=SimpleNamespace(distance=2.0, elevation=-5.0, azimuth=20.0)
+    )
+    assert (
+        run_kwargs["viewer_handle_status_provider"](handle)
+        == "camera distance=2 elevation=-5 azimuth=20"
     )
 
 
@@ -569,6 +642,9 @@ def test_launch_motion_viewer_runner_help_avoids_task_registration_imports() -> 
     assert "then resumes the same viewer" in help_text
     assert "renderings/<timestamp>" in result.stdout
     assert "--video-fps" not in result.stdout
+    assert "--camera-distance" not in result.stdout
+    assert "--camera-elevation" not in result.stdout
+    assert "--camera-azimuth" not in result.stdout
     assert "--smoke-test" in result.stdout
     assert "rsl_rl" not in result.stderr
 

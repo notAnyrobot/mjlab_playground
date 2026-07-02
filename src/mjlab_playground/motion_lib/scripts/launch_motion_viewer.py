@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -24,6 +25,8 @@ from mjlab_playground.motion_lib.motion_viewer import (
 
 __all__ = [
     "AstroMujocoSceneAdapter",
+    "DEFAULT_CAMERA_CONFIG",
+    "ViewerCameraConfig",
     "MotionViewer",
     "MotionViewerVerificationError",
     "OffscreenFrameRenderer",
@@ -39,6 +42,16 @@ __all__ = [
 ]
 
 MOTION_FORMAT_CHOICES = ("pyroki", "proto")
+
+
+@dataclass(frozen=True)
+class ViewerCameraConfig:
+    distance: float = 2.0
+    elevation: float = -5.0
+    azimuth: float = 20.0
+
+
+DEFAULT_CAMERA_CONFIG = ViewerCameraConfig()
 
 
 class MotionViewerVerificationError(RuntimeError):
@@ -109,9 +122,9 @@ class OffscreenFrameRenderer:
             width=640,
             origin_type=viewer_config_cls.OriginType.ASSET_ROOT,
             entity_name="robot",
-            distance=2.0,
-            elevation=-5.0,
-            azimuth=20,
+            distance=DEFAULT_CAMERA_CONFIG.distance,
+            elevation=DEFAULT_CAMERA_CONFIG.elevation,
+            azimuth=DEFAULT_CAMERA_CONFIG.azimuth,
         )
         sim = scene_adapter.sim  # type: ignore[attr-defined]
         self._renderer = offscreen_renderer_cls(
@@ -367,6 +380,31 @@ def _build_interactive_recording_executor(
     return recording_executor
 
 
+def _viewer_handle_configurator(viewer: Any) -> Callable[[Any], None] | None:
+    scene_adapter = getattr(viewer, "scene_adapter", None)
+    configure_tracking_camera = getattr(scene_adapter, "configure_tracking_camera", None)
+    if configure_tracking_camera is None:
+        return None
+
+    def configure(viewer_handle: Any) -> None:
+        configure_tracking_camera(viewer_handle, DEFAULT_CAMERA_CONFIG)
+
+    return configure
+
+
+def _format_camera_value(value: Any) -> str:
+    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def _viewer_handle_camera_status(viewer_handle: Any) -> str:
+    cam = viewer_handle.cam
+    return (
+        f"camera distance={_format_camera_value(cam.distance)} "
+        f"elevation={_format_camera_value(cam.elevation)} "
+        f"azimuth={_format_camera_value(cam.azimuth)}"
+    )
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -430,10 +468,25 @@ def main(
                         robot=args.robot,
                         device=args.device,
                     ),
+                    viewer_handle_configurator=_viewer_handle_configurator(
+                        built_viewer
+                    ),
+                    viewer_handle_status_provider=_viewer_handle_camera_status,
                 )
                 return
 
-            built_viewer.run_interactive(status_reporter=status_reporter)
+            viewer_handle_configurator = _viewer_handle_configurator(built_viewer)
+            if viewer_handle_configurator is None:
+                built_viewer.run_interactive(
+                    status_reporter=status_reporter,
+                    viewer_handle_status_provider=_viewer_handle_camera_status,
+                )
+            else:
+                built_viewer.run_interactive(
+                    status_reporter=status_reporter,
+                    viewer_handle_configurator=viewer_handle_configurator,
+                    viewer_handle_status_provider=_viewer_handle_camera_status,
+                )
 
     run_viewer(viewer)
 

@@ -171,6 +171,17 @@ class AstroMujocoSceneAdapter:
         except TypeError:
             return
 
+    def configure_tracking_camera(self, viewer_handle: Any, camera_config: Any) -> None:
+        import mujoco
+
+        cam = viewer_handle.cam
+        cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING.value
+        cam.trackbodyid = int(self.robot.indexing.root_body_id)
+        cam.fixedcamid = -1
+        cam.distance = float(camera_config.distance)
+        cam.elevation = float(camera_config.elevation)
+        cam.azimuth = float(camera_config.azimuth)
+
     def _resolve_joint_ids(self) -> list[int]:
         joint_ids, matched_names = self.robot.find_joints(
             self.joint_names,

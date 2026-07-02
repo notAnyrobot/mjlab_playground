@@ -35,3 +35,7 @@ _Avoid_: Viewer recording mode, motion source recorder
 **Reference motion viewer**:
 A source-agnostic viewer for already-loaded reference motion clips. It plays, scrubs, switches, and optionally records clips without knowing which motion artifact format produced them.
 _Avoid_: PyRoki viewer, motion file viewer, loader viewer
+
+**Root-tracking camera**:
+A viewer camera whose target follows the rendered robot root body during reference motion playback or recording while preserving user control over view angle and distance.
+_Avoid_: Fixed world camera, source motion camera
