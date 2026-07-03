@@ -12,6 +12,63 @@ import torch
 MotionFormat = Literal["pyroki", "proto"]
 
 
+def _validate_integer_fps(fps: float, *, field_name: str = "fps") -> float:
+    value = float(fps)
+    if value <= 0.0 or not math.isfinite(value):
+        raise ValueError(f"{field_name} must be positive and finite")
+    if not value.is_integer():
+        raise ValueError(f"{field_name} must be integer-valued")
+    return value
+
+
+def _validate_float_tensor(
+    tensor: torch.Tensor,
+    *,
+    field_name: str,
+    shape_suffix: tuple[int | None, ...],
+    frame_count: int | None = None,
+    dtype: torch.dtype | None = None,
+    device: torch.device | None = None,
+) -> None:
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{field_name} must be a torch.Tensor")
+    expected_ndim = len(shape_suffix) + 1
+    if tensor.ndim != expected_ndim:
+        shape_text = _format_tensor_shape(shape_suffix)
+        raise ValueError(
+            f"{field_name} must have shape ({shape_text}), got {tuple(tensor.shape)}"
+        )
+    if frame_count is not None and tensor.shape[0] != frame_count:
+        raise ValueError(
+            f"{field_name} must share frame count {frame_count}, got {tensor.shape[0]}"
+        )
+    for axis, expected_dim in enumerate(shape_suffix, start=1):
+        if expected_dim is not None and tensor.shape[axis] != expected_dim:
+            shape_text = _format_tensor_shape(shape_suffix)
+            raise ValueError(
+                f"{field_name} must have shape ({shape_text}), got {tuple(tensor.shape)}"
+            )
+    if not torch.is_floating_point(tensor):
+        raise TypeError(f"{field_name} must be a floating point tensor")
+    if dtype is not None and tensor.dtype != dtype:
+        raise ValueError(f"{field_name} must share dtype {dtype}, got {tensor.dtype}")
+    if device is not None and tensor.device != device:
+        raise ValueError(f"{field_name} must share device {device}, got {tensor.device}")
+    if not torch.isfinite(tensor).all().item():
+        raise ValueError(f"{field_name} contains non-finite values")
+
+
+def _format_tensor_shape(shape_suffix: tuple[int | None, ...]) -> str:
+    return ", ".join("D" if dim is None else str(dim) for dim in ("T", *shape_suffix))
+
+
+def _validate_quaternion_tensor(tensor: torch.Tensor, *, field_name: str) -> None:
+    quat_norms = torch.linalg.norm(tensor, dim=-1)
+    expected = torch.ones_like(quat_norms)
+    if not torch.allclose(quat_norms, expected, rtol=1e-4, atol=1e-4):
+        raise ValueError(f"{field_name} quaternions must be normalized")
+
+
 @dataclass(frozen=True, kw_only=True)
 class ReferenceMotionState:
     """Reference motion state for one frame or a batch of frames."""
@@ -32,8 +89,88 @@ class ReferenceMotionState:
     body_contacts: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
-        if self.fps <= 0.0 or not math.isfinite(self.fps):
-            raise ValueError("fps must be positive and finite")
+        object.__setattr__(self, "fps", _validate_integer_fps(self.fps))
+
+        _validate_float_tensor(self.root_pos, field_name="root_pos", shape_suffix=(3,))
+        frame_count = self.root_pos.shape[0]
+        if frame_count <= 2:
+            raise ValueError("ReferenceMotionState requires at least 3 frames")
+        dtype = self.root_pos.dtype
+        device = self.root_pos.device
+
+        _validate_float_tensor(
+            self.root_rot,
+            field_name="root_rot",
+            shape_suffix=(4,),
+            frame_count=frame_count,
+            dtype=dtype,
+            device=device,
+        )
+        _validate_quaternion_tensor(self.root_rot, field_name="root_rot")
+        _validate_float_tensor(
+            self.dof_pos,
+            field_name="dof_pos",
+            shape_suffix=(None,),
+            frame_count=frame_count,
+            dtype=dtype,
+            device=device,
+        )
+
+        self._validate_optional_float_field("root_lin_vel", self.root_lin_vel, (3,))
+        self._validate_optional_float_field("root_ang_vel", self.root_ang_vel, (3,))
+        self._validate_optional_float_field(
+            "dof_vel",
+            self.dof_vel,
+            (self.dof_pos.shape[1],),
+        )
+        self._validate_optional_float_field("body_pos", self.body_pos, (None, 3))
+        self._validate_optional_float_field("body_rot", self.body_rot, (None, 4))
+        if self.body_rot is not None:
+            _validate_quaternion_tensor(self.body_rot, field_name="body_rot")
+        self._validate_optional_float_field("body_lin_vel", self.body_lin_vel, (None, 3))
+        self._validate_optional_float_field("body_ang_vel", self.body_ang_vel, (None, 3))
+        self._validate_optional_contacts()
+
+    def _validate_optional_float_field(
+        self,
+        field_name: str,
+        value: torch.Tensor | None,
+        shape_suffix: tuple[int | None, ...],
+    ) -> None:
+        if value is None:
+            return
+        _validate_float_tensor(
+            value,
+            field_name=field_name,
+            shape_suffix=shape_suffix,
+            frame_count=self.root_pos.shape[0],
+            dtype=self.root_pos.dtype,
+            device=self.root_pos.device,
+        )
+
+    def _validate_optional_contacts(self) -> None:
+        if self.body_contacts is None:
+            return
+        if not isinstance(self.body_contacts, torch.Tensor):
+            raise TypeError("body_contacts must be a torch.Tensor")
+        if self.body_contacts.ndim != 2:
+            raise ValueError(
+                f"body_contacts must have shape (T, B), got {tuple(self.body_contacts.shape)}"
+            )
+        if self.body_contacts.shape[0] != self.root_pos.shape[0]:
+            raise ValueError(
+                "body_contacts must share frame count "
+                f"{self.root_pos.shape[0]}, got {self.body_contacts.shape[0]}"
+            )
+        if self.body_contacts.device != self.root_pos.device:
+            raise ValueError(
+                f"body_contacts must share device {self.root_pos.device}, "
+                f"got {self.body_contacts.device}"
+            )
+        if torch.is_floating_point(self.body_contacts) and not torch.isfinite(
+            self.body_contacts
+        ).all().item():
+            raise ValueError("body_contacts contains non-finite values")
 
 
 class MotionLoader(ABC):
@@ -88,10 +225,8 @@ class PyrokiMotionLoader(MotionLoader):
         fps: float = 30.0,
         device: str | torch.device = "cpu",
     ) -> None:
-        if fps <= 0.0 or not math.isfinite(fps):
-            raise ValueError("fps must be positive and finite")
         self.motion_files = Path(motion_files)
-        self.fps = float(fps)
+        self.fps = _validate_integer_fps(fps)
         self.device = torch.device(device)
 
     def load_motion(self) -> list[ReferenceMotionState]:
@@ -184,8 +319,8 @@ class PyrokiMotionLoader(MotionLoader):
             raise ValueError(f"'joint_angles' must be 2D, got shape {dof_pos.shape}")
 
         frame_count = root_pos.shape[0]
-        if frame_count == 0:
-            raise ValueError("PyRoki motion must contain at least one frame")
+        if frame_count <= 2:
+            raise ValueError("PyRoki motion must contain at least 3 frames")
         if root_rot.shape[0] != frame_count or dof_pos.shape[0] != frame_count:
             raise ValueError(
                 "PyRoki arrays must have matching frame counts: "
