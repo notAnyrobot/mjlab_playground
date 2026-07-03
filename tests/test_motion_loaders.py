@@ -30,19 +30,33 @@ MotionLoader = _motion_loader.MotionLoader
 PyrokiMotionLoader = _motion_loader.PyrokiMotionLoader
 
 
-def _write_pyroki_npz(path: Path, *, frames: int = 2) -> None:
+def _write_pyroki_npz(path: Path, *, frames: int = 3) -> None:
     np.savez(
         path,
         base_frame_pos=np.array(
-            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
             dtype=np.float64,
         )[:frames],
         base_frame_wxyz=np.array(
-            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
             dtype=np.float64,
         )[:frames],
         joint_angles=np.array(
-            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+            dtype=np.float64,
+        )[:frames],
+    )
+
+
+def _write_contact_labels_npz(path: Path, *, frames: int = 3) -> None:
+    np.savez(
+        path,
+        foot_contacts=np.array(
+            [[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]],
             dtype=np.float64,
         )[:frames],
     )
@@ -66,16 +80,73 @@ def test_pyroki_motion_loader_loads_single_npz_into_reference_motion_state(
     assert motion.dof_pos.dtype == torch.float32
     torch.testing.assert_close(
         motion.root_pos,
-        torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+        torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]),
     )
     torch.testing.assert_close(
         motion.root_rot,
-        torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]),
+        torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]
+        ),
     )
     torch.testing.assert_close(
         motion.dof_pos,
-        torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),
+        torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]),
     )
+
+
+def test_pyroki_motion_loader_optionally_loads_matching_contact_labels(
+    tmp_path: Path,
+) -> None:
+    motion_dir = tmp_path / "pyroki-retargeted-astro"
+    contact_dir = tmp_path / "contacts"
+    motion_dir.mkdir()
+    contact_dir.mkdir()
+    motion_path = motion_dir / "0008_0008_Walking001_poses_keypoints_retargeted.npz"
+    contact_path = contact_dir / "0008_0008_Walking001_poses_keypoints_contacts.npz"
+    _write_pyroki_npz(motion_path)
+    _write_contact_labels_npz(contact_path)
+
+    motions = MotionLoader.load(motion_path, contact_labels=contact_dir)
+
+    assert len(motions) == 1
+    assert motions[0].foot_contacts is not None
+    torch.testing.assert_close(
+        motions[0].foot_contacts,
+        torch.tensor([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]]),
+    )
+
+
+def test_pyroki_motion_loader_validates_real_sfu_contact_label_artifact() -> None:
+    motion_path = Path(
+        "/media/android/data/motion_datasets/protomotions/astro/sfu/"
+        "pyroki-retargeted-astro/"
+        "0008_0008_Walking001_poses_keypoints_retargeted.npz"
+    )
+    contact_dir = Path(
+        "/media/android/data/motion_datasets/protomotions/smpl/sfu/contacts"
+    )
+    if not motion_path.exists() or not contact_dir.exists():
+        pytest.skip("local SFU PyRoki/contact artifacts are not available")
+
+    motion = MotionLoader.load(motion_path, contact_labels=contact_dir)[0]
+
+    assert motion.foot_contacts is not None
+    assert motion.foot_contacts.shape == (motion.root_pos.shape[0], 2)
+    assert motion.foot_contacts.dtype == torch.float32
+    assert motion.root_pos.shape == (807, 3)
+    assert torch.all((motion.foot_contacts >= 0.0) & (motion.foot_contacts <= 1.0))
+
+
+def test_pyroki_motion_loader_fails_fast_when_contact_labels_are_missing(
+    tmp_path: Path,
+) -> None:
+    motion_path = tmp_path / "motion_retargeted.npz"
+    contact_dir = tmp_path / "contacts"
+    contact_dir.mkdir()
+    _write_pyroki_npz(motion_path)
+
+    with pytest.raises(FileNotFoundError, match="motion_contacts\\.npz"):
+        MotionLoader.load(motion_path, contact_labels=contact_dir)
 
 
 def test_motion_loader_is_abstract() -> None:

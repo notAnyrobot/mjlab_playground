@@ -39,6 +39,7 @@ class ReferenceMotionResampler:
         "body_lin_vel",
         "body_ang_vel",
         "body_contacts",
+        "foot_contacts",
     )
 
     def __init__(self, cfg: MotionResamplingCfg) -> None:

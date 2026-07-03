@@ -87,6 +87,7 @@ class ReferenceMotionState:
     body_lin_vel: torch.Tensor | None = None
     body_ang_vel: torch.Tensor | None = None
     body_contacts: torch.Tensor | None = None
+    foot_contacts: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fps", _validate_integer_fps(self.fps))
@@ -130,6 +131,7 @@ class ReferenceMotionState:
         self._validate_optional_float_field("body_lin_vel", self.body_lin_vel, (None, 3))
         self._validate_optional_float_field("body_ang_vel", self.body_ang_vel, (None, 3))
         self._validate_optional_contacts()
+        self._validate_optional_foot_contacts()
 
     def _validate_optional_float_field(
         self,
@@ -172,6 +174,33 @@ class ReferenceMotionState:
         ).all().item():
             raise ValueError("body_contacts contains non-finite values")
 
+    def _validate_optional_foot_contacts(self) -> None:
+        if self.foot_contacts is None:
+            return
+        if not isinstance(self.foot_contacts, torch.Tensor):
+            raise TypeError("foot_contacts must be a torch.Tensor")
+        if self.foot_contacts.ndim != 2 or self.foot_contacts.shape[1] != 2:
+            raise ValueError(
+                "foot_contacts must have shape "
+                f"(T, 2), got {tuple(self.foot_contacts.shape)}"
+            )
+        if self.foot_contacts.shape[0] != self.root_pos.shape[0]:
+            raise ValueError(
+                "foot_contacts must share frame count "
+                f"{self.root_pos.shape[0]}, got {self.foot_contacts.shape[0]}"
+            )
+        if self.foot_contacts.device != self.root_pos.device:
+            raise ValueError(
+                f"foot_contacts must share device {self.root_pos.device}, "
+                f"got {self.foot_contacts.device}"
+            )
+        if torch.is_floating_point(self.foot_contacts):
+            if not torch.isfinite(self.foot_contacts).all().item():
+                raise ValueError("foot_contacts contains non-finite values")
+            return
+        if self.foot_contacts.dtype != torch.bool:
+            raise TypeError("foot_contacts must be a floating point or bool tensor")
+
 
 class MotionLoader(ABC):
     """Base class for source-format adapters that produce reference motions."""
@@ -184,6 +213,7 @@ class MotionLoader(ABC):
         motion_format: MotionFormat = "pyroki",
         fps: float = 30.0,
         device: str | torch.device = "cpu",
+        contact_labels: str | Path | None = None,
     ) -> list[ReferenceMotionState]:
         """Load reference motions from a known source format."""
         return cls.from_format(
@@ -191,6 +221,7 @@ class MotionLoader(ABC):
             motion_format=motion_format,
             fps=fps,
             device=device,
+            contact_labels=contact_labels,
         ).load_motion()
 
     @classmethod
@@ -201,10 +232,16 @@ class MotionLoader(ABC):
         motion_format: MotionFormat = "pyroki",
         fps: float = 30.0,
         device: str | torch.device = "cpu",
+        contact_labels: str | Path | None = None,
     ) -> "MotionLoader":
         """Build the loader adapter for a known source format."""
         if motion_format == "pyroki":
-            return PyrokiMotionLoader(motion_files, fps=fps, device=device)
+            return PyrokiMotionLoader(
+                motion_files,
+                fps=fps,
+                device=device,
+                contact_labels=contact_labels,
+            )
         if motion_format == "proto":
             raise NotImplementedError("proto motion loading is not implemented yet")
 
@@ -224,14 +261,25 @@ class PyrokiMotionLoader(MotionLoader):
         *,
         fps: float = 30.0,
         device: str | torch.device = "cpu",
+        contact_labels: str | Path | None = None,
     ) -> None:
         self.motion_files = Path(motion_files)
         self.fps = _validate_integer_fps(fps)
         self.device = torch.device(device)
+        self.contact_labels = Path(contact_labels) if contact_labels is not None else None
 
     def load_motion(self) -> list[ReferenceMotionState]:
         motions = []
-        for motion_path in self._motion_paths():
+        motion_paths = self._motion_paths()
+        if (
+            self.contact_labels is not None
+            and self.contact_labels.is_file()
+            and len(motion_paths) != 1
+        ):
+            raise ValueError(
+                "A single contact label file can only be used with one motion file"
+            )
+        for motion_path in motion_paths:
             try:
                 motions.append(self._load_file(motion_path))
             except Exception as exc:
@@ -273,6 +321,9 @@ class PyrokiMotionLoader(MotionLoader):
             root_pos=self._to_float32_tensor(root_pos),
             root_rot=self._to_float32_tensor(root_rot),
             dof_pos=self._to_float32_tensor(dof_pos),
+            foot_contacts=self._load_contact_labels(
+                motion_path, frame_count=root_pos.shape[0]
+            ),
         )
 
     @staticmethod
@@ -285,6 +336,48 @@ class PyrokiMotionLoader(MotionLoader):
             if name.endswith(suffix):
                 return name[: -len(suffix)]
         return name
+
+    def _load_contact_labels(
+        self,
+        motion_path: Path,
+        *,
+        frame_count: int,
+    ) -> torch.Tensor | None:
+        if self.contact_labels is None:
+            return None
+
+        contact_path = self._contact_label_path(motion_path)
+        with np.load(contact_path, allow_pickle=False) as data:
+            foot_contacts = self._load_array(data, "foot_contacts")
+
+        if foot_contacts.ndim != 2 or foot_contacts.shape[1] != 2:
+            raise ValueError(
+                "'foot_contacts' must have shape (num_frames, 2), "
+                f"got {foot_contacts.shape}"
+            )
+        if foot_contacts.shape[0] != frame_count:
+            raise ValueError(
+                "'foot_contacts' must share frame count "
+                f"{frame_count}, got {foot_contacts.shape[0]}"
+            )
+        return self._to_float32_tensor(foot_contacts)
+
+    def _contact_label_path(self, motion_path: Path) -> Path:
+        assert self.contact_labels is not None
+        if self.contact_labels.is_file():
+            return self.contact_labels
+        if not self.contact_labels.is_dir():
+            raise FileNotFoundError(
+                f"Contact labels path does not exist: {self.contact_labels}"
+            )
+
+        base_name = motion_path.stem
+        if base_name.endswith("_retargeted"):
+            base_name = base_name[: -len("_retargeted")]
+        contact_path = self.contact_labels / f"{base_name}_contacts.npz"
+        if not contact_path.is_file():
+            raise FileNotFoundError(f"Contact labels file not found: {contact_path}")
+        return contact_path
 
     @staticmethod
     def _load_array(
