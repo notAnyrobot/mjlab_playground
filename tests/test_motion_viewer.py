@@ -221,6 +221,37 @@ def test_motion_viewer_import_surface_is_source_agnostic() -> None:
     ]
 
 
+def test_motion_viewer_validation_path_accepts_rich_reference_motion_state() -> None:
+    from mjlab_playground.motion_lib import ReferenceMotionState
+    from mjlab_playground.motion_lib.motion_viewer import (
+        verify_reference_motion_viewer_path,
+    )
+
+    rich_motion = ReferenceMotionState(
+        name="rich_walk.npz",
+        display_name="rich_walk",
+        fps=60.0,
+        root_pos=torch.tensor(
+            [[0.0, 0.0, 0.8], [0.1, 0.0, 0.8], [0.2, 0.0, 0.8]]
+        ),
+        root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
+        dof_pos=torch.zeros(3, 29),
+        root_lin_vel=torch.zeros(3, 3),
+        root_ang_vel=torch.zeros(3, 3),
+        dof_vel=torch.zeros(3, 29),
+        body_pos=torch.ones(3, 31, 3),
+        body_rot=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(3, 31, 1),
+        body_lin_vel=torch.full((3, 31, 3), 2.0),
+        body_ang_vel=torch.full((3, 31, 3), 3.0),
+    )
+    scene_adapter = FakeSceneAdapter()
+
+    viewer = verify_reference_motion_viewer_path([rich_motion], scene_adapter)
+
+    assert viewer.motions == [rich_motion]
+    assert scene_adapter.applied == [(rich_motion, 0)]
+
+
 def test_motion_viewer_requires_injected_headless_recording_attachment(
     tmp_path: Path,
 ) -> None:

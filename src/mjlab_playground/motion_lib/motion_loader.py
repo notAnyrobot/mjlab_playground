@@ -9,7 +9,7 @@ from typing import Literal
 import numpy as np
 import torch
 
-MotionFormat = Literal["pyroki", "proto"]
+MotionFormat = Literal["pyroki", "proto", "mjlab"]
 
 
 def _validate_integer_fps(fps: float, *, field_name: str = "fps") -> float:
@@ -242,8 +242,13 @@ class MotionLoader(ABC):
                 device=device,
                 contact_labels=contact_labels,
             )
+        if motion_format == "mjlab":
+            if contact_labels is not None:
+                raise ValueError("mjlab motion loading does not accept contact_labels")
+            return ReferenceMotionNpzLoader(motion_files, fps=fps, device=device)
         if motion_format == "proto":
             raise NotImplementedError("proto motion loading is not implemented yet")
+        raise ValueError(f"Unsupported motion format {motion_format!r}")
 
     @abstractmethod
     def load_motion(self) -> list[ReferenceMotionState]:
@@ -428,3 +433,121 @@ class PyrokiMotionLoader(MotionLoader):
 
     def _to_float32_tensor(self, array: np.ndarray) -> torch.Tensor:
         return torch.as_tensor(array, dtype=torch.float32, device=self.device)
+
+
+class ReferenceMotionNpzLoader(MotionLoader):
+    """Load MotionLib train-ready ``.npz`` clips into reference motion states."""
+
+    _REQUIRED_KEYS = (
+        "root_pos",
+        "root_rot",
+        "dof_pos",
+        "root_lin_vel",
+        "root_ang_vel",
+        "dof_vel",
+        "body_pos",
+        "body_rot",
+        "body_lin_vel",
+        "body_ang_vel",
+    )
+
+    def __init__(
+        self,
+        motion_files: str | Path,
+        *,
+        fps: float = 30.0,
+        device: str | torch.device = "cpu",
+    ) -> None:
+        self.motion_files = Path(motion_files)
+        self.fps = _validate_integer_fps(fps)
+        self.device = torch.device(device)
+
+    def load_motion(self) -> list[ReferenceMotionState]:
+        motions = []
+        for motion_path in self._motion_paths():
+            try:
+                motions.append(self._load_file(motion_path))
+            except Exception as exc:
+                msg = f"{motion_path}: {exc}"
+                raise type(exc)(msg) from exc
+        return motions
+
+    def _motion_paths(self) -> list[Path]:
+        if self.motion_files.is_file():
+            if self.motion_files.suffix != ".npz":
+                raise ValueError(
+                    "Expected a .npz MotionLib reference motion file, "
+                    f"got {self.motion_files}"
+                )
+            return [self.motion_files]
+
+        if self.motion_files.is_dir():
+            motion_paths = sorted(
+                path
+                for path in self.motion_files.iterdir()
+                if path.is_file() and path.suffix == ".npz"
+            )
+            if not motion_paths:
+                raise ValueError(f"No direct child .npz files found in {self.motion_files}")
+            return motion_paths
+
+        raise FileNotFoundError(f"Motion path does not exist: {self.motion_files}")
+
+    def _load_file(self, motion_path: Path) -> ReferenceMotionState:
+        with np.load(motion_path, allow_pickle=False) as data:
+            arrays = {
+                key: self._load_float_array(data, key) for key in self._REQUIRED_KEYS
+            }
+            body_contacts = self._load_optional_contacts(data)
+
+        return ReferenceMotionState(
+            name=motion_path.name,
+            display_name=motion_path.stem,
+            fps=self.fps,
+            root_pos=self._to_tensor(arrays["root_pos"]),
+            root_rot=self._to_tensor(arrays["root_rot"]),
+            dof_pos=self._to_tensor(arrays["dof_pos"]),
+            root_lin_vel=self._to_tensor(arrays["root_lin_vel"]),
+            root_ang_vel=self._to_tensor(arrays["root_ang_vel"]),
+            dof_vel=self._to_tensor(arrays["dof_vel"]),
+            body_pos=self._to_tensor(arrays["body_pos"]),
+            body_rot=self._to_tensor(arrays["body_rot"]),
+            body_lin_vel=self._to_tensor(arrays["body_lin_vel"]),
+            body_ang_vel=self._to_tensor(arrays["body_ang_vel"]),
+            body_contacts=body_contacts,
+        )
+
+    @staticmethod
+    def _load_float_array(
+        data: np.lib.npyio.NpzFile,
+        key: str,
+    ) -> np.ndarray:
+        if key not in data.files:
+            raise ValueError(f"Missing required MotionLib key {key!r}")
+        array = np.asarray(data[key])
+        if not np.issubdtype(array.dtype, np.floating):
+            raise ValueError(f"{key!r} must be floating point, got dtype {array.dtype}")
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"{key!r} contains non-finite values")
+        return array
+
+    def _load_optional_contacts(
+        self,
+        data: np.lib.npyio.NpzFile,
+    ) -> torch.Tensor | None:
+        if "body_contacts" not in data.files:
+            return None
+        array = np.asarray(data["body_contacts"])
+        if not (
+            np.issubdtype(array.dtype, np.bool_) or np.issubdtype(array.dtype, np.number)
+        ):
+            raise ValueError(
+                "'body_contacts' must be bool or numeric, "
+                f"got dtype {array.dtype}"
+            )
+        if np.issubdtype(array.dtype, np.floating) and not np.all(np.isfinite(array)):
+            raise ValueError("'body_contacts' contains non-finite values")
+        return torch.as_tensor(array, device=self.device)
+
+    def _to_tensor(self, array: np.ndarray) -> torch.Tensor:
+        return torch.as_tensor(array, device=self.device)

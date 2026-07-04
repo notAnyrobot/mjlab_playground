@@ -28,6 +28,7 @@ def _load_motion_loader_module() -> ModuleType:
 _motion_loader = _load_motion_loader_module()
 MotionLoader = _motion_loader.MotionLoader
 PyrokiMotionLoader = _motion_loader.PyrokiMotionLoader
+ReferenceMotionNpzLoader = _motion_loader.ReferenceMotionNpzLoader
 
 
 def _write_pyroki_npz(path: Path, *, frames: int = 3) -> None:
@@ -59,6 +60,34 @@ def _write_contact_labels_npz(path: Path, *, frames: int = 3) -> None:
             [[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]],
             dtype=np.float64,
         )[:frames],
+    )
+
+
+def _write_train_ready_npz(path: Path, *, frames: int = 3) -> None:
+    body_count = 2
+    dof_count = 3
+    identity_root_quat = np.tile(
+        np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+        (frames, 1),
+    )
+    identity_body_quat = np.tile(
+        np.array([[[1.0, 0.0, 0.0, 0.0]]], dtype=np.float32),
+        (frames, body_count, 1),
+    )
+    np.savez(
+        path,
+        root_pos=np.arange(frames * 3, dtype=np.float32).reshape(frames, 3),
+        root_rot=identity_root_quat,
+        dof_pos=np.arange(frames * dof_count, dtype=np.float32).reshape(
+            frames, dof_count
+        ),
+        root_lin_vel=np.ones((frames, 3), dtype=np.float32),
+        root_ang_vel=np.ones((frames, 3), dtype=np.float32) * 2.0,
+        dof_vel=np.ones((frames, dof_count), dtype=np.float32) * 3.0,
+        body_pos=np.ones((frames, body_count, 3), dtype=np.float32) * 4.0,
+        body_rot=identity_body_quat,
+        body_lin_vel=np.ones((frames, body_count, 3), dtype=np.float32) * 5.0,
+        body_ang_vel=np.ones((frames, body_count, 3), dtype=np.float32) * 6.0,
     )
 
 
@@ -198,6 +227,91 @@ def test_motion_loader_selects_pyroki_adapter(tmp_path: Path) -> None:
 
     assert isinstance(loader, PyrokiMotionLoader)
     assert loader.load_motion()[0].fps == 50.0
+
+
+def test_reference_motion_npz_loader_loads_train_ready_export(
+    tmp_path: Path,
+) -> None:
+    motion_path = tmp_path / "walk_retargeted.npz"
+    _write_train_ready_npz(motion_path)
+
+    motions = ReferenceMotionNpzLoader(motion_path, fps=50.0).load_motion()
+
+    assert len(motions) == 1
+    motion = motions[0]
+    assert motion.name == "walk_retargeted.npz"
+    assert motion.display_name == "walk_retargeted"
+    assert motion.fps == 50.0
+    torch.testing.assert_close(
+        motion.root_pos,
+        torch.arange(9, dtype=torch.float32).reshape(3, 3),
+    )
+    assert motion.root_lin_vel is not None
+    assert motion.root_ang_vel is not None
+    assert motion.dof_vel is not None
+    assert motion.body_pos is not None
+    assert motion.body_rot is not None
+    assert motion.body_lin_vel is not None
+    assert motion.body_ang_vel is not None
+
+
+def test_reference_motion_npz_loader_optionally_loads_body_contacts(
+    tmp_path: Path,
+) -> None:
+    motion_path = tmp_path / "walk.npz"
+    _write_train_ready_npz(motion_path)
+    with np.load(motion_path, allow_pickle=False) as original:
+        payload = {key: original[key] for key in original.files}
+    payload["body_contacts"] = np.array(
+        [[True, False], [False, True], [True, True]],
+        dtype=np.bool_,
+    )
+    np.savez(motion_path, **payload)
+
+    motion = ReferenceMotionNpzLoader(motion_path).load_motion()[0]
+
+    assert motion.body_contacts is not None
+    assert motion.body_contacts.dtype == torch.bool
+    torch.testing.assert_close(
+        motion.body_contacts,
+        torch.tensor([[True, False], [False, True], [True, True]]),
+    )
+
+
+def test_reference_motion_npz_loader_loads_flat_directory_in_sorted_order(
+    tmp_path: Path,
+) -> None:
+    motion_dir = tmp_path / "mjlab-astro"
+    motion_dir.mkdir()
+    _write_train_ready_npz(motion_dir / "b_motion.npz")
+    _write_train_ready_npz(motion_dir / "a_motion.npz")
+    (motion_dir / "README.txt").write_text("sidecar")
+
+    motions = ReferenceMotionNpzLoader(motion_dir).load_motion()
+
+    assert [motion.name for motion in motions] == ["a_motion.npz", "b_motion.npz"]
+
+
+def test_motion_loader_selects_reference_motion_npz_adapter(tmp_path: Path) -> None:
+    motion_path = tmp_path / "motion.npz"
+    _write_train_ready_npz(motion_path)
+
+    loader = MotionLoader.from_format(motion_path, motion_format="mjlab", fps=50.0)
+
+    assert isinstance(loader, ReferenceMotionNpzLoader)
+    assert loader.load_motion()[0].fps == 50.0
+
+
+def test_reference_motion_npz_loader_fails_fast_with_bad_clip_path(
+    tmp_path: Path,
+) -> None:
+    motion_dir = tmp_path / "mjlab-astro"
+    motion_dir.mkdir()
+    _write_train_ready_npz(motion_dir / "good.npz")
+    np.savez(motion_dir / "bad.npz", root_pos=np.zeros((3, 3), dtype=np.float32))
+
+    with pytest.raises(ValueError, match=r"bad\.npz: Missing required MotionLib key"):
+        ReferenceMotionNpzLoader(motion_dir).load_motion()
 
 
 def test_proto_format_is_reserved_but_not_implemented(tmp_path: Path) -> None:

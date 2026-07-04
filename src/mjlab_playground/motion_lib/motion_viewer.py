@@ -521,3 +521,13 @@ class MotionViewer:
         if fps <= 0.0 or not math.isfinite(fps):
             raise ValueError("reference motion fps must be positive and finite")
         return fps
+
+
+def verify_reference_motion_viewer_path(
+    motions: Sequence[Any],
+    scene_adapter: SceneAdapter,
+) -> MotionViewer:
+    """Construct a source-agnostic viewer and apply one reference frame."""
+    viewer = MotionViewer(motions, scene_adapter)
+    viewer.render_current_frame()
+    return viewer

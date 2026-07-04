@@ -41,7 +41,7 @@ __all__ = [
     "verify_motion_viewer_path",
 ]
 
-MOTION_FORMAT_CHOICES = ("pyroki", "proto")
+MOTION_FORMAT_CHOICES = ("pyroki", "proto", "mjlab")
 
 
 @dataclass(frozen=True)

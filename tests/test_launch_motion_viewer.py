@@ -71,9 +71,15 @@ class FakeSceneAdapter:
 def _write_pyroki_npz(path: Path, *, dof_count: int = 29) -> None:
     np.savez(
         path,
-        base_frame_pos=np.array([[1.0, 2.0, 3.0]], dtype=np.float64),
-        base_frame_wxyz=np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float64),
-        joint_angles=np.zeros((1, dof_count), dtype=np.float64),
+        base_frame_pos=np.array(
+            [[1.0, 2.0, 3.0], [1.1, 2.0, 3.0], [1.2, 2.0, 3.0]],
+            dtype=np.float64,
+        ),
+        base_frame_wxyz=np.array(
+            [[1.0, 0.0, 0.0, 0.0]] * 3,
+            dtype=np.float64,
+        ),
+        joint_angles=np.zeros((3, dof_count), dtype=np.float64),
     )
 
 
@@ -393,6 +399,10 @@ def test_motion_viewer_main_wires_interactive_recording_subprocess(
         [
             "--motion-files",
             str(motion_path),
+            "--format",
+            "mjlab",
+            "--fps",
+            "50",
             "--record-video",
             "--output-dir",
             str(output_dir),
@@ -416,9 +426,9 @@ def test_motion_viewer_main_wires_interactive_recording_subprocess(
                 "--motion-files",
                 str(motion_path),
                 "--format",
-                "pyroki",
+                "mjlab",
                 "--fps",
-                "30.0",
+                "50.0",
                 "--robot",
                 "astro",
                 "--device",
@@ -666,6 +676,23 @@ def test_motion_viewer_cli_accepts_proto_format() -> None:
     )
 
     assert args.motion_format == "proto"
+    assert args.fps == 50.0
+    assert args.robot == "astro"
+
+
+def test_motion_viewer_cli_accepts_mjlab_train_ready_format() -> None:
+    args = parse_args(
+        [
+            "--motion-files",
+            "/tmp/mjlab-astro/walk.npz",
+            "--format",
+            "mjlab",
+            "--fps",
+            "50",
+        ]
+    )
+
+    assert args.motion_format == "mjlab"
     assert args.fps == 50.0
     assert args.robot == "astro"
 
