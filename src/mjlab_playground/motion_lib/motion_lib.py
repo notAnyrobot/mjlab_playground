@@ -95,6 +95,217 @@ class MotionLib:
                 raise type(exc)(f"{identifier}: {exc}") from exc
         return resampled
 
+    def query(
+        self,
+        motion: ReferenceMotionState,
+        *,
+        motion_ids: torch.Tensor,
+        motion_times: torch.Tensor,
+    ) -> ReferenceMotionState:
+        """Query package-shaped reference motion tensors by clip ID and seconds."""
+        if not isinstance(motion_ids, torch.Tensor):
+            raise TypeError("motion_ids must be a torch.Tensor")
+        if not isinstance(motion_times, torch.Tensor):
+            raise TypeError("motion_times must be a torch.Tensor")
+        if motion_ids.ndim != 1:
+            raise ValueError("motion_ids must be 1D")
+        if motion_times.ndim != 1:
+            raise ValueError("motion_times must be 1D")
+        if motion_ids.shape != motion_times.shape:
+            raise ValueError("motion_ids and motion_times must have matching shapes")
+        integer_dtypes = (torch.int8, torch.int16, torch.int32, torch.int64)
+        if motion_ids.dtype not in integer_dtypes:
+            raise TypeError("motion_ids must be an integer tensor")
+        if not torch.is_floating_point(motion_times):
+            raise TypeError("motion_times must be a floating point tensor")
+        if motion_ids.device != motion.root_pos.device:
+            raise ValueError(
+                f"motion_ids must share device {motion.root_pos.device}, got {motion_ids.device}"
+            )
+        if motion_times.device != motion.root_pos.device:
+            raise ValueError(
+                "motion_times must share device "
+                f"{motion.root_pos.device}, got {motion_times.device}"
+            )
+        if not torch.isfinite(motion_times).all().item():
+            raise ValueError("motion_times contains non-finite values")
+
+        clip_starts, clip_lengths, clip_fps = self._package_clip_metadata(motion)
+        num_clips = int(clip_starts.numel())
+        if ((motion_ids < 0) | (motion_ids >= num_clips)).any().item():
+            raise ValueError("motion_ids contains out-of-range clip IDs")
+
+        selected_clip_fps = clip_fps[motion_ids]
+        selected_clip_lengths = clip_lengths[motion_ids]
+        clip_durations = (
+            selected_clip_lengths.to(motion_times.dtype) - 1.0
+        ) / selected_clip_fps.to(
+            motion_times.dtype
+        )
+        if ((motion_times < 0.0) | (motion_times > clip_durations)).any().item():
+            raise ValueError("motion_times contains out-of-range clip-local times")
+
+        frame_positions = motion_times * selected_clip_fps.to(motion_times.dtype)
+        local_lower = torch.floor(frame_positions).to(
+            dtype=torch.long
+        )
+        local_upper = torch.minimum(local_lower + 1, selected_clip_lengths - 1)
+        blend = frame_positions - local_lower.to(dtype=frame_positions.dtype)
+        lower_indices = clip_starts[motion_ids] + local_lower
+        upper_indices = clip_starts[motion_ids] + local_upper
+
+        return ReferenceMotionState(
+            name=motion.name,
+            display_name=motion.display_name,
+            fps=motion.fps,
+            root_pos=self._lerp_indexed_values(
+                motion.root_pos, lower_indices, upper_indices, blend
+            ),
+            root_rot=self._slerp_indexed_quaternions_wxyz(
+                motion.root_rot, lower_indices, upper_indices, blend
+            ),
+            dof_pos=self._lerp_indexed_values(
+                motion.dof_pos, lower_indices, upper_indices, blend
+            ),
+            root_lin_vel=self._maybe_lerp_indexed_values(
+                motion.root_lin_vel, lower_indices, upper_indices, blend
+            ),
+            root_ang_vel=self._maybe_lerp_indexed_values(
+                motion.root_ang_vel, lower_indices, upper_indices, blend
+            ),
+            dof_vel=self._maybe_lerp_indexed_values(
+                motion.dof_vel, lower_indices, upper_indices, blend
+            ),
+            body_pos=self._maybe_lerp_indexed_values(
+                motion.body_pos, lower_indices, upper_indices, blend
+            ),
+            body_rot=self._maybe_slerp_indexed_quaternions_wxyz(
+                motion.body_rot, lower_indices, upper_indices, blend
+            ),
+            body_lin_vel=self._maybe_lerp_indexed_values(
+                motion.body_lin_vel, lower_indices, upper_indices, blend
+            ),
+            body_ang_vel=self._maybe_lerp_indexed_values(
+                motion.body_ang_vel, lower_indices, upper_indices, blend
+            ),
+            body_contacts=self._maybe_query_contact_values(
+                motion.body_contacts, lower_indices, upper_indices, blend
+            ),
+            foot_contacts=self._maybe_query_contact_values(
+                motion.foot_contacts, lower_indices, upper_indices, blend
+            ),
+        )
+
+    @staticmethod
+    def _package_clip_metadata(
+        motion: ReferenceMotionState,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if (
+            motion.clip_starts is None
+            and motion.clip_lengths is None
+            and motion.clip_fps is None
+        ):
+            return (
+                torch.tensor([0], dtype=torch.long, device=motion.root_pos.device),
+                torch.tensor(
+                    [motion.root_pos.shape[0]],
+                    dtype=torch.long,
+                    device=motion.root_pos.device,
+                ),
+                torch.tensor(
+                    [motion.fps],
+                    dtype=motion.root_pos.dtype,
+                    device=motion.root_pos.device,
+                ),
+            )
+        if (
+            motion.clip_starts is None
+            or motion.clip_lengths is None
+            or motion.clip_fps is None
+        ):
+            raise ValueError(
+                "clip_starts, clip_lengths, and clip_fps must be provided together"
+            )
+        return motion.clip_starts, motion.clip_lengths, motion.clip_fps
+
+    @staticmethod
+    def _maybe_query_contact_values(
+        values: torch.Tensor | None,
+        lower_indices: torch.Tensor,
+        upper_indices: torch.Tensor,
+        blend: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if values is None:
+            return None
+        if torch.is_floating_point(values):
+            return MotionLib._lerp_indexed_values(
+                values, lower_indices, upper_indices, blend
+            )
+        return values[lower_indices]
+
+    @staticmethod
+    def _maybe_lerp_indexed_values(
+        values: torch.Tensor | None,
+        lower_indices: torch.Tensor,
+        upper_indices: torch.Tensor,
+        blend: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if values is None:
+            return None
+        return MotionLib._lerp_indexed_values(values, lower_indices, upper_indices, blend)
+
+    @staticmethod
+    def _lerp_indexed_values(
+        values: torch.Tensor,
+        lower_indices: torch.Tensor,
+        upper_indices: torch.Tensor,
+        blend: torch.Tensor,
+    ) -> torch.Tensor:
+        view_shape = (-1,) + (1,) * (values.ndim - 1)
+        blend_view = blend.reshape(view_shape)
+        return values[lower_indices] * (1.0 - blend_view) + values[
+            upper_indices
+        ] * blend_view
+
+    @staticmethod
+    def _maybe_slerp_indexed_quaternions_wxyz(
+        quaternions: torch.Tensor | None,
+        lower_indices: torch.Tensor,
+        upper_indices: torch.Tensor,
+        blend: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if quaternions is None:
+            return None
+        return MotionLib._slerp_indexed_quaternions_wxyz(
+            quaternions, lower_indices, upper_indices, blend
+        )
+
+    @staticmethod
+    def _slerp_indexed_quaternions_wxyz(
+        quaternions: torch.Tensor,
+        lower_indices: torch.Tensor,
+        upper_indices: torch.Tensor,
+        blend: torch.Tensor,
+    ) -> torch.Tensor:
+        q0 = quaternions[lower_indices]
+        q1 = quaternions[upper_indices]
+        dot = (q0 * q1).sum(dim=-1, keepdim=True)
+        q1 = torch.where(dot < 0.0, -q1, q1)
+        dot = (q0 * q1).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
+
+        t = blend.reshape((-1,) + (1,) * (q0.ndim - 1))
+        lerp_result = q0 * (1.0 - t) + q1 * t
+
+        theta = torch.acos(dot)
+        sin_theta = torch.sin(theta)
+        slerp_result = (
+            torch.sin((1.0 - t) * theta) / sin_theta * q0
+            + torch.sin(t * theta) / sin_theta * q1
+        )
+        near_parallel = dot.abs() > 0.9995
+        result = torch.where(near_parallel, lerp_result, slerp_result)
+        return torch.nn.functional.normalize(result, dim=-1)
+
     @staticmethod
     def _motion_identifier(motion: ReferenceMotionState) -> str:
         return motion.name or motion.display_name or "<unnamed motion>"

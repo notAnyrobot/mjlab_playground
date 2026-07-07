@@ -71,7 +71,7 @@ def _validate_quaternion_tensor(tensor: torch.Tensor, *, field_name: str) -> Non
 
 @dataclass(frozen=True, kw_only=True)
 class ReferenceMotionState:
-    """Reference motion state for one frame or a batch of frames."""
+    """Package-shaped reference motion state over packed frame tensors."""
 
     root_pos: torch.Tensor
     root_rot: torch.Tensor
@@ -88,14 +88,17 @@ class ReferenceMotionState:
     body_ang_vel: torch.Tensor | None = None
     body_contacts: torch.Tensor | None = None
     foot_contacts: torch.Tensor | None = None
+    clip_starts: torch.Tensor | None = None
+    clip_lengths: torch.Tensor | None = None
+    clip_fps: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fps", _validate_integer_fps(self.fps))
 
         _validate_float_tensor(self.root_pos, field_name="root_pos", shape_suffix=(3,))
         frame_count = self.root_pos.shape[0]
-        if frame_count <= 2:
-            raise ValueError("ReferenceMotionState requires at least 3 frames")
+        if frame_count < 1:
+            raise ValueError("ReferenceMotionState requires at least one frame")
         dtype = self.root_pos.dtype
         device = self.root_pos.device
 
@@ -132,6 +135,7 @@ class ReferenceMotionState:
         self._validate_optional_float_field("body_ang_vel", self.body_ang_vel, (None, 3))
         self._validate_optional_contacts()
         self._validate_optional_foot_contacts()
+        self._validate_package_metadata()
 
     def _validate_optional_float_field(
         self,
@@ -200,6 +204,76 @@ class ReferenceMotionState:
             return
         if self.foot_contacts.dtype != torch.bool:
             raise TypeError("foot_contacts must be a floating point or bool tensor")
+
+    def _validate_package_metadata(self) -> None:
+        metadata = (self.clip_starts, self.clip_lengths, self.clip_fps)
+        if all(value is None for value in metadata):
+            return
+
+        if any(value is None for value in metadata):
+            raise ValueError(
+                "clip_starts, clip_lengths, and clip_fps must be provided together"
+            )
+        assert self.clip_starts is not None
+        assert self.clip_lengths is not None
+        assert self.clip_fps is not None
+
+        if self.clip_starts.ndim != 1:
+            raise ValueError("clip_starts must be 1D")
+        if self.clip_lengths.ndim != 1:
+            raise ValueError("clip_lengths must be 1D")
+        if self.clip_fps.ndim != 1:
+            raise ValueError("clip_fps must be 1D")
+        if not (
+            self.clip_starts.shape == self.clip_lengths.shape == self.clip_fps.shape
+        ):
+            raise ValueError("clip metadata tensors must have matching lengths")
+        if self.clip_starts.numel() == 0:
+            raise ValueError("clip metadata must contain at least one clip")
+        if self.clip_starts.device != self.root_pos.device:
+            raise ValueError(
+                f"clip_starts must share device {self.root_pos.device}, "
+                f"got {self.clip_starts.device}"
+            )
+        if self.clip_lengths.device != self.root_pos.device:
+            raise ValueError(
+                f"clip_lengths must share device {self.root_pos.device}, "
+                f"got {self.clip_lengths.device}"
+            )
+        if self.clip_fps.device != self.root_pos.device:
+            raise ValueError(
+                f"clip_fps must share device {self.root_pos.device}, got {self.clip_fps.device}"
+            )
+        integer_dtypes = (torch.int8, torch.int16, torch.int32, torch.int64)
+        if self.clip_starts.dtype not in integer_dtypes:
+            raise TypeError("clip_starts must be an integer tensor")
+        if self.clip_lengths.dtype not in integer_dtypes:
+            raise TypeError("clip_lengths must be an integer tensor")
+        if not torch.is_floating_point(self.clip_fps):
+            raise TypeError("clip_fps must be a floating point tensor")
+        if (self.clip_starts < 0).any().item():
+            raise ValueError("clip_starts must be non-negative")
+        if (self.clip_lengths <= 0).any().item():
+            raise ValueError("clip_lengths must be positive")
+        if not torch.isfinite(self.clip_fps).all().item() or (
+            self.clip_fps <= 0.0
+        ).any().item():
+            raise ValueError("clip_fps must be positive and finite")
+        if not torch.equal(self.clip_fps, torch.round(self.clip_fps)):
+            raise ValueError("clip_fps must be integer-valued")
+        expected_fps = torch.full_like(self.clip_fps, self.fps)
+        if not torch.equal(self.clip_fps, expected_fps):
+            raise ValueError("clip_fps must match fps")
+
+        expected_starts = torch.empty_like(self.clip_starts)
+        expected_starts[0] = 0
+        if self.clip_lengths.numel() > 1:
+            expected_starts[1:] = torch.cumsum(self.clip_lengths[:-1], dim=0)
+        if not torch.equal(self.clip_starts, expected_starts):
+            raise ValueError("clip spans must be contiguous")
+        total_frames = int(self.clip_lengths.sum().item())
+        if total_frames != self.root_pos.shape[0]:
+            raise ValueError("clip spans must cover the packed frame tensors")
 
 
 class MotionLoader(ABC):

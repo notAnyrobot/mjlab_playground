@@ -76,7 +76,9 @@ def _load_motion_lib_classes() -> tuple[type[Any], type[Any]]:
 
 
 def _load_writer_class() -> type[Any]:
-    from mjlab_playground.motion_lib import ReferenceMotionNpzWriter
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
 
     return ReferenceMotionNpzWriter
 

@@ -46,6 +46,9 @@ def test_reference_motion_state_defaults_to_30_fps_and_preserves_required_tensor
     assert state.dof_vel is None
     assert state.body_pos is None
     assert state.body_contacts is None
+    assert state.clip_starts is None
+    assert state.clip_lengths is None
+    assert state.clip_fps is None
 
 
 def test_reference_motion_state_accepts_full_reference_motion_fields() -> None:
@@ -69,6 +72,22 @@ def test_reference_motion_state_accepts_full_reference_motion_fields() -> None:
     assert state.body_pos.shape == (4, 31, 3)
     assert state.body_contacts is not None
     assert state.body_contacts.dtype == torch.bool
+
+
+def test_reference_motion_state_accepts_valid_multi_clip_package_metadata() -> None:
+    state = ReferenceMotionState(
+        fps=50.0,
+        root_pos=torch.zeros(9, 3),
+        root_rot=_identity_root_rot(9),
+        dof_pos=torch.zeros(9, 29),
+        clip_starts=torch.tensor([0, 3, 6]),
+        clip_lengths=torch.tensor([3, 3, 3]),
+        clip_fps=torch.tensor([50.0, 50.0, 50.0]),
+    )
+
+    torch.testing.assert_close(state.clip_starts, torch.tensor([0, 3, 6]))
+    torch.testing.assert_close(state.clip_lengths, torch.tensor([3, 3, 3]))
+    torch.testing.assert_close(state.clip_fps, torch.tensor([50.0, 50.0, 50.0]))
 
 
 def test_reference_motion_state_accepts_source_foot_contacts() -> None:
@@ -138,16 +157,130 @@ def test_reference_motion_state_rejects_non_integer_fps() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("metadata", "match"),
+    [
+        (
+            {
+                "clip_starts": torch.tensor([0, 3]),
+                "clip_lengths": torch.tensor([3, 2]),
+                "clip_fps": torch.tensor([30.0, 30.0]),
+            },
+            "clip spans must cover",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([0, 2]),
+                "clip_lengths": torch.tensor([3, 3]),
+                "clip_fps": torch.tensor([30.0, 30.0]),
+            },
+            "clip spans must be contiguous",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([0, -3]),
+                "clip_lengths": torch.tensor([3, 3]),
+                "clip_fps": torch.tensor([30.0, 30.0]),
+            },
+            "clip_starts must be non-negative",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([0, 3]),
+                "clip_lengths": torch.tensor([3, 0]),
+                "clip_fps": torch.tensor([30.0, 30.0]),
+            },
+            "clip_lengths must be positive",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([0, 3]),
+                "clip_lengths": torch.tensor([3, 3]),
+                "clip_fps": torch.tensor([30.0, 0.0]),
+            },
+            "clip_fps must be positive and finite",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([0, 3]),
+                "clip_lengths": torch.tensor([3, 3]),
+                "clip_fps": torch.tensor([30.0, float("inf")]),
+            },
+            "clip_fps must be positive and finite",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([0, 3]),
+                "clip_lengths": torch.tensor([3, 3]),
+                "clip_fps": torch.tensor([30.0, 29.97]),
+            },
+            "clip_fps must be integer-valued",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([0, 3]),
+                "clip_lengths": torch.tensor([3, 3]),
+                "clip_fps": torch.tensor([30.0, 60.0]),
+            },
+            "clip_fps must match fps",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([False, True]),
+                "clip_lengths": torch.tensor([3, 3]),
+                "clip_fps": torch.tensor([30.0, 30.0]),
+            },
+            "clip_starts must be an integer tensor",
+        ),
+        (
+            {
+                "clip_starts": torch.tensor([0, 3]),
+                "clip_lengths": torch.tensor([True, True]),
+                "clip_fps": torch.tensor([30.0, 30.0]),
+            },
+            "clip_lengths must be an integer tensor",
+        ),
+    ],
+)
+def test_reference_motion_state_rejects_invalid_package_metadata(
+    metadata: dict[str, torch.Tensor],
+    match: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=match):
+        ReferenceMotionState(
+            fps=30.0,
+            root_pos=torch.zeros(6, 3),
+            root_rot=_identity_root_rot(6),
+            dof_pos=torch.zeros(6, 29),
+            **metadata,
+        )
+
+
+def test_reference_motion_state_rejects_incomplete_package_metadata() -> None:
+    with pytest.raises(ValueError, match="must be provided together"):
+        ReferenceMotionState(
+            fps=30.0,
+            root_pos=torch.zeros(6, 3),
+            root_rot=_identity_root_rot(6),
+            dof_pos=torch.zeros(6, 29),
+            clip_starts=torch.tensor([0, 3]),
+        )
+
+
 @pytest.mark.parametrize("num_frames", [1, 2])
-def test_reference_motion_state_rejects_clips_without_velocity_context(
+def test_reference_motion_state_accepts_small_sampled_batches_without_package_metadata(
     num_frames: int,
 ) -> None:
-    with pytest.raises(ValueError, match="at least 3 frames"):
-        ReferenceMotionState(
-            root_pos=torch.zeros(num_frames, 3),
-            root_rot=_identity_root_rot(num_frames),
-            dof_pos=torch.zeros(num_frames, 29),
-        )
+    state = ReferenceMotionState(
+        root_pos=torch.zeros(num_frames, 3),
+        root_rot=_identity_root_rot(num_frames),
+        dof_pos=torch.zeros(num_frames, 29),
+    )
+
+    assert state.root_pos.shape[0] == num_frames
+    assert state.clip_starts is None
+    assert state.clip_lengths is None
+    assert state.clip_fps is None
 
 
 def test_reference_motion_state_rejects_shape_dtype_device_and_finite_mismatches() -> None:

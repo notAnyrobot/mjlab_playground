@@ -12,10 +12,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from mjlab_playground.motion_lib import (  # noqa: E402
+from mjlab_playground.motion_lib import ReferenceMotionState  # noqa: E402
+from mjlab_playground.motion_lib.motion_resampler import (  # noqa: E402
     MotionResamplingCfg,
     ReferenceMotionResampler,
-    ReferenceMotionState,
 )
 
 

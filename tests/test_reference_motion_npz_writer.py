@@ -77,7 +77,9 @@ def _rich_reference_motion(**overrides):
 def test_reference_motion_npz_writer_writes_train_ready_tensor_payload(
     tmp_path: Path,
 ) -> None:
-    from mjlab_playground.motion_lib import ReferenceMotionNpzWriter
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
 
     motion = _rich_reference_motion()
     output_path = tmp_path / "new-dataset" / "walk.npz"
@@ -112,7 +114,9 @@ def test_reference_motion_npz_writer_writes_train_ready_tensor_payload(
 def test_reference_motion_npz_writer_rejects_non_npz_output_path(
     tmp_path: Path,
 ) -> None:
-    from mjlab_playground.motion_lib import ReferenceMotionNpzWriter
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
 
     output_path = tmp_path / "walk.txt"
 
@@ -141,7 +145,9 @@ def test_reference_motion_npz_writer_rejects_missing_train_ready_fields(
     tmp_path: Path,
     field_name: str,
 ) -> None:
-    from mjlab_playground.motion_lib import ReferenceMotionNpzWriter
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
 
     motion = _rich_reference_motion()
     object.__setattr__(motion, field_name, None)
@@ -153,7 +159,9 @@ def test_reference_motion_npz_writer_rejects_missing_train_ready_fields(
 def test_reference_motion_npz_writer_writes_optional_body_contacts(
     tmp_path: Path,
 ) -> None:
-    from mjlab_playground.motion_lib import ReferenceMotionNpzWriter
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
 
     body_contacts = torch.tensor(
         [[True, False], [False, True], [True, True]],
@@ -172,7 +180,9 @@ def test_reference_motion_npz_writer_writes_optional_body_contacts(
 def test_reference_motion_npz_writer_rejects_source_foot_contacts(
     tmp_path: Path,
 ) -> None:
-    from mjlab_playground.motion_lib import ReferenceMotionNpzWriter
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
 
     motion = dataclasses.replace(
         _rich_reference_motion(),

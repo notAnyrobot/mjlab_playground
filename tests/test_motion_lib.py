@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import sys
 from pathlib import Path
 
@@ -50,6 +51,47 @@ def _reference_motion(*, fps: float = 60.0, name: str = "walk_retargeted.npz"):
     )
 
 
+def _package_reference_motion():
+    from mjlab_playground.motion_lib import ReferenceMotionState
+
+    return ReferenceMotionState(
+        name="package",
+        display_name="package",
+        fps=10.0,
+        root_pos=torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [11.0, 0.0, 0.0],
+                [12.0, 0.0, 0.0],
+            ]
+        ),
+        root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(6, 1),
+        dof_pos=torch.tensor(
+            [
+                [0.0, 100.0],
+                [1.0, 101.0],
+                [2.0, 102.0],
+                [10.0, 110.0],
+                [11.0, 111.0],
+                [12.0, 112.0],
+            ]
+        ),
+        clip_starts=torch.tensor([0, 3]),
+        clip_lengths=torch.tensor([3, 3]),
+        clip_fps=torch.tensor([10.0, 10.0]),
+    )
+
+
+def _z_quat(degrees: float) -> torch.Tensor:
+    radians = math.radians(degrees)
+    return torch.tensor(
+        [math.cos(radians / 2.0), 0.0, 0.0, math.sin(radians / 2.0)]
+    )
+
+
 def _reject_adapter_creation(monkeypatch: pytest.MonkeyPatch) -> None:
     import mjlab_playground.motion_lib.motion_lib as motion_lib_module
 
@@ -65,9 +107,268 @@ def _reject_adapter_creation(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_motion_lib_query_reads_exact_frames_from_multi_clip_package() -> None:
+    from mjlab_playground.motion_lib import (
+        MotionLib,
+        MotionLibCfg,
+        ReferenceMotionState,
+    )
+
+    motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+    package = _package_reference_motion()
+
+    result = motion_lib.query(
+        package,
+        motion_ids=torch.tensor([0, 1, 1]),
+        motion_times=torch.tensor([0.1, 0.0, 0.2]),
+    )
+
+    assert isinstance(result, ReferenceMotionState)
+    assert result.clip_starts is None
+    assert result.clip_lengths is None
+    assert result.clip_fps is None
+    torch.testing.assert_close(
+        result.root_pos,
+        torch.tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [12.0, 0.0, 0.0],
+            ]
+        ),
+    )
+    torch.testing.assert_close(
+        result.dof_pos,
+        torch.tensor(
+            [
+                [1.0, 101.0],
+                [10.0, 110.0],
+                [12.0, 112.0],
+            ]
+        ),
+    )
+
+
+def test_motion_lib_query_interpolates_clip_local_times() -> None:
+    from mjlab_playground.motion_lib import (
+        MotionLib,
+        MotionLibCfg,
+        ReferenceMotionState,
+    )
+
+    motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+    package = ReferenceMotionState(
+        fps=10.0,
+        root_pos=torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [2.0, 4.0, 0.0]]
+        ),
+        root_rot=torch.stack([_z_quat(0.0), _z_quat(90.0), _z_quat(180.0)]),
+        dof_pos=torch.tensor([[0.0, 10.0], [2.0, 20.0], [4.0, 30.0]]),
+    )
+
+    result = motion_lib.query(
+        package,
+        motion_ids=torch.tensor([0]),
+        motion_times=torch.tensor([0.05]),
+    )
+
+    torch.testing.assert_close(result.root_pos, torch.tensor([[0.5, 1.0, 0.0]]))
+    torch.testing.assert_close(result.dof_pos, torch.tensor([[1.0, 15.0]]))
+    torch.testing.assert_close(result.root_rot, _z_quat(45.0).unsqueeze(0))
+
+
+def test_motion_lib_query_treats_missing_package_metadata_as_single_clip() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+    motion = _package_reference_motion()
+    motion = dataclasses.replace(
+        motion,
+        clip_starts=None,
+        clip_lengths=None,
+        clip_fps=None,
+    )
+
+    result = motion_lib.query(
+        motion,
+        motion_ids=torch.tensor([0]),
+        motion_times=torch.tensor([0.1]),
+    )
+
+    torch.testing.assert_close(result.root_pos, torch.tensor([[1.0, 0.0, 0.0]]))
+    assert result.clip_starts is None
+    assert result.clip_lengths is None
+    assert result.clip_fps is None
+
+
+def test_motion_lib_query_rejects_times_past_clip_boundary() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+    package = _package_reference_motion()
+
+    with pytest.raises(ValueError, match="motion_times.*out-of-range"):
+        motion_lib.query(
+            package,
+            motion_ids=torch.tensor([0]),
+            motion_times=torch.tensor([0.25]),
+        )
+
+
+def test_motion_lib_query_interpolates_optional_reference_fields() -> None:
+    from mjlab_playground.motion_lib import (
+        MotionLib,
+        MotionLibCfg,
+        ReferenceMotionState,
+    )
+
+    motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+    package = ReferenceMotionState(
+        fps=10.0,
+        root_pos=torch.zeros(3, 3),
+        root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
+        dof_pos=torch.zeros(3, 2),
+        root_lin_vel=torch.tensor(
+            [[0.0, 0.0, 0.0], [2.0, 4.0, 0.0], [4.0, 8.0, 0.0]]
+        ),
+        root_ang_vel=torch.tensor(
+            [[0.0, 0.0, 0.0], [0.0, 2.0, 4.0], [0.0, 4.0, 8.0]]
+        ),
+        dof_vel=torch.tensor([[0.0, 10.0], [2.0, 20.0], [4.0, 30.0]]),
+        body_pos=torch.tensor(
+            [
+                [[0.0, 0.0, 0.0]],
+                [[2.0, 4.0, 6.0]],
+                [[4.0, 8.0, 12.0]],
+            ]
+        ),
+        body_rot=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(3, 1, 1),
+        body_lin_vel=torch.tensor(
+            [
+                [[0.0, 0.0, 0.0]],
+                [[2.0, 4.0, 6.0]],
+                [[4.0, 8.0, 12.0]],
+            ]
+        ),
+        body_ang_vel=torch.tensor(
+            [
+                [[0.0, 0.0, 0.0]],
+                [[6.0, 4.0, 2.0]],
+                [[12.0, 8.0, 4.0]],
+            ]
+        ),
+    )
+
+    result = motion_lib.query(
+        package,
+        motion_ids=torch.tensor([0]),
+        motion_times=torch.tensor([0.05]),
+    )
+
+    assert result.root_lin_vel is not None
+    assert result.root_ang_vel is not None
+    assert result.dof_vel is not None
+    assert result.body_pos is not None
+    assert result.body_rot is not None
+    assert result.body_lin_vel is not None
+    assert result.body_ang_vel is not None
+    torch.testing.assert_close(result.root_lin_vel, torch.tensor([[1.0, 2.0, 0.0]]))
+    torch.testing.assert_close(result.root_ang_vel, torch.tensor([[0.0, 1.0, 2.0]]))
+    torch.testing.assert_close(result.dof_vel, torch.tensor([[1.0, 15.0]]))
+    torch.testing.assert_close(result.body_pos, torch.tensor([[[1.0, 2.0, 3.0]]]))
+    torch.testing.assert_close(result.body_rot, torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]))
+    torch.testing.assert_close(result.body_lin_vel, torch.tensor([[[1.0, 2.0, 3.0]]]))
+    torch.testing.assert_close(result.body_ang_vel, torch.tensor([[[3.0, 2.0, 1.0]]]))
+
+
+def test_motion_lib_query_rejects_out_of_range_motion_ids() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+    package = _package_reference_motion()
+
+    with pytest.raises(ValueError, match="motion_ids.*out-of-range"):
+        motion_lib.query(
+            package,
+            motion_ids=torch.tensor([2]),
+            motion_times=torch.tensor([0.0]),
+        )
+
+
+@pytest.mark.parametrize(
+    ("motion_ids", "motion_times", "match"),
+    [
+        (torch.tensor([[0]]), torch.tensor([0.0]), "motion_ids must be 1D"),
+        (torch.tensor([0]), torch.tensor([[0.0]]), "motion_times must be 1D"),
+        (
+            torch.tensor([0, 1]),
+            torch.tensor([0.0]),
+            "motion_ids and motion_times must have matching shapes",
+        ),
+        (torch.tensor([0.0]), torch.tensor([0.0]), "motion_ids must be an integer"),
+        (torch.tensor([False]), torch.tensor([0.0]), "motion_ids must be an integer"),
+        (torch.tensor([0]), torch.tensor([0]), "motion_times must be a floating point"),
+    ],
+)
+def test_motion_lib_query_rejects_malformed_id_and_time_tensors(
+    motion_ids: torch.Tensor,
+    motion_times: torch.Tensor,
+    match: str,
+) -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+    package = _package_reference_motion()
+
+    with pytest.raises((TypeError, ValueError), match=match):
+        motion_lib.query(
+            package,
+            motion_ids=motion_ids,
+            motion_times=motion_times,
+        )
+
+
+def test_motion_lib_query_returns_contact_fields() -> None:
+    from mjlab_playground.motion_lib import (
+        MotionLib,
+        MotionLibCfg,
+        ReferenceMotionState,
+    )
+
+    motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+    package = ReferenceMotionState(
+        fps=10.0,
+        root_pos=torch.zeros(3, 3),
+        root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
+        dof_pos=torch.zeros(3, 2),
+        body_contacts=torch.tensor(
+            [[False, True], [True, False], [True, True]],
+            dtype=torch.bool,
+        ),
+        foot_contacts=torch.tensor(
+            [[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+            dtype=torch.float32,
+        ),
+    )
+
+    result = motion_lib.query(
+        package,
+        motion_ids=torch.tensor([0]),
+        motion_times=torch.tensor([0.1]),
+    )
+
+    assert result.body_contacts is not None
+    assert result.foot_contacts is not None
+    torch.testing.assert_close(result.body_contacts, torch.tensor([[True, False]]))
+    torch.testing.assert_close(result.foot_contacts, torch.tensor([[1.0, 0.0]]))
+
+
 def test_motion_lib_public_exports_construct_astro_pyroki_pipeline() -> None:
     import mjlab_playground.motion_lib as motion_lib_package
-    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+    from mjlab_playground.motion_lib import (
+        MotionLib,
+        MotionLibCfg,
+    )
 
     cfg = MotionLibCfg(
         source_format="pyroki",
@@ -84,6 +385,29 @@ def test_motion_lib_public_exports_construct_astro_pyroki_pipeline() -> None:
         cfg.output_fps = 120.0
     assert MotionLib.__name__ in motion_lib_package.__all__
     assert MotionLibCfg.__name__ in motion_lib_package.__all__
+    assert set(motion_lib_package.__all__) == {
+        "ClipWeighting",
+        "MimicMotionManager",
+        "MotionLib",
+        "MotionLibCfg",
+        "MotionManager",
+        "MotionManagerCfg",
+        "ReferenceMotionSample",
+        "ReferenceMotionState",
+        "TimeSampling",
+    }
+    assert "MotionLoader" not in motion_lib_package.__all__
+    assert "MotionResamplingCfg" not in motion_lib_package.__all__
+    assert "ReferenceMotionNpzWriter" not in motion_lib_package.__all__
+    assert "ReferenceMotionQueryResult" not in motion_lib_package.__all__
+    with pytest.raises(ImportError):
+        from mjlab_playground.motion_lib import MotionLoader  # noqa: F401
+    with pytest.raises(ImportError):
+        from mjlab_playground.motion_lib import MotionResamplingCfg  # noqa: F401
+    with pytest.raises(ImportError):
+        from mjlab_playground.motion_lib import ReferenceMotionNpzWriter  # noqa: F401
+    with pytest.raises(ImportError):
+        from mjlab_playground.motion_lib import ReferenceMotionQueryResult  # noqa: F401
 
 
 def test_motion_lib_cfg_validates_v1_pipeline_options() -> None:
