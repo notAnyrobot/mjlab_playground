@@ -53,7 +53,9 @@ def _validate_float_tensor(
     if dtype is not None and tensor.dtype != dtype:
         raise ValueError(f"{field_name} must share dtype {dtype}, got {tensor.dtype}")
     if device is not None and tensor.device != device:
-        raise ValueError(f"{field_name} must share device {device}, got {tensor.device}")
+        raise ValueError(
+            f"{field_name} must share device {device}, got {tensor.device}"
+        )
     if not torch.isfinite(tensor).all().item():
         raise ValueError(f"{field_name} contains non-finite values")
 
@@ -70,8 +72,159 @@ def _validate_quaternion_tensor(tensor: torch.Tensor, *, field_name: str) -> Non
 
 
 @dataclass(frozen=True, kw_only=True)
-class ReferenceMotionState:
-    """Package-shaped reference motion state over packed frame tensors."""
+class ReferenceFrame:
+    """One reference timestep in robot coordinates."""
+
+    root_pos: torch.Tensor
+    root_rot: torch.Tensor
+    dof_pos: torch.Tensor
+    root_lin_vel: torch.Tensor | None = None
+    root_ang_vel: torch.Tensor | None = None
+    dof_vel: torch.Tensor | None = None
+    body_pos: torch.Tensor | None = None
+    body_rot: torch.Tensor | None = None
+    body_lin_vel: torch.Tensor | None = None
+    body_ang_vel: torch.Tensor | None = None
+    body_contacts: torch.Tensor | None = None
+    foot_contacts: torch.Tensor | None = None
+
+    def __post_init__(self) -> None:
+        _validate_frame_float_tensor(
+            self.root_pos, field_name="root_pos", shape_suffix=(3,)
+        )
+        dtype = self.root_pos.dtype
+        device = self.root_pos.device
+        _validate_frame_float_tensor(
+            self.root_rot,
+            field_name="root_rot",
+            shape_suffix=(4,),
+            dtype=dtype,
+            device=device,
+        )
+        _validate_quaternion_tensor(self.root_rot, field_name="root_rot")
+        _validate_frame_float_tensor(
+            self.dof_pos,
+            field_name="dof_pos",
+            shape_suffix=(None,),
+            dtype=dtype,
+            device=device,
+        )
+        self._validate_optional_float_field("root_lin_vel", self.root_lin_vel, (3,))
+        self._validate_optional_float_field("root_ang_vel", self.root_ang_vel, (3,))
+        self._validate_optional_float_field(
+            "dof_vel", self.dof_vel, (self.dof_pos.shape[0],)
+        )
+        self._validate_optional_float_field("body_pos", self.body_pos, (None, 3))
+        self._validate_optional_float_field("body_rot", self.body_rot, (None, 4))
+        if self.body_rot is not None:
+            _validate_quaternion_tensor(self.body_rot, field_name="body_rot")
+        self._validate_optional_float_field(
+            "body_lin_vel", self.body_lin_vel, (None, 3)
+        )
+        self._validate_optional_float_field(
+            "body_ang_vel", self.body_ang_vel, (None, 3)
+        )
+        self._validate_optional_contacts()
+        self._validate_optional_foot_contacts()
+
+    def _validate_optional_float_field(
+        self,
+        field_name: str,
+        value: torch.Tensor | None,
+        shape_suffix: tuple[int | None, ...],
+    ) -> None:
+        if value is None:
+            return
+        _validate_frame_float_tensor(
+            value,
+            field_name=field_name,
+            shape_suffix=shape_suffix,
+            dtype=self.root_pos.dtype,
+            device=self.root_pos.device,
+        )
+
+    def _validate_optional_contacts(self) -> None:
+        if self.body_contacts is None:
+            return
+        if not isinstance(self.body_contacts, torch.Tensor):
+            raise TypeError("body_contacts must be a torch.Tensor")
+        if self.body_contacts.ndim != 1:
+            raise ValueError(
+                f"body_contacts must have shape (B,), got {tuple(self.body_contacts.shape)}"
+            )
+        if self.body_contacts.device != self.root_pos.device:
+            raise ValueError(
+                f"body_contacts must share device {self.root_pos.device}, "
+                f"got {self.body_contacts.device}"
+            )
+        if (
+            torch.is_floating_point(self.body_contacts)
+            and not torch.isfinite(self.body_contacts).all().item()
+        ):
+            raise ValueError("body_contacts contains non-finite values")
+
+    def _validate_optional_foot_contacts(self) -> None:
+        if self.foot_contacts is None:
+            return
+        if not isinstance(self.foot_contacts, torch.Tensor):
+            raise TypeError("foot_contacts must be a torch.Tensor")
+        if self.foot_contacts.ndim != 1 or self.foot_contacts.shape[0] != 2:
+            raise ValueError(
+                f"foot_contacts must have shape (2,), got {tuple(self.foot_contacts.shape)}"
+            )
+        if self.foot_contacts.device != self.root_pos.device:
+            raise ValueError(
+                f"foot_contacts must share device {self.root_pos.device}, "
+                f"got {self.foot_contacts.device}"
+            )
+        if torch.is_floating_point(self.foot_contacts):
+            if not torch.isfinite(self.foot_contacts).all().item():
+                raise ValueError("foot_contacts contains non-finite values")
+            return
+        if self.foot_contacts.dtype != torch.bool:
+            raise TypeError("foot_contacts must be a floating point or bool tensor")
+
+
+def _validate_frame_float_tensor(
+    tensor: torch.Tensor,
+    *,
+    field_name: str,
+    shape_suffix: tuple[int | None, ...],
+    dtype: torch.dtype | None = None,
+    device: torch.device | None = None,
+) -> None:
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{field_name} must be a torch.Tensor")
+    if tensor.ndim != len(shape_suffix):
+        shape_text = _format_frame_tensor_shape(shape_suffix)
+        raise ValueError(
+            f"{field_name} must have shape ({shape_text}), got {tuple(tensor.shape)}"
+        )
+    for axis, expected_dim in enumerate(shape_suffix):
+        if expected_dim is not None and tensor.shape[axis] != expected_dim:
+            shape_text = _format_frame_tensor_shape(shape_suffix)
+            raise ValueError(
+                f"{field_name} must have shape ({shape_text}), got {tuple(tensor.shape)}"
+            )
+    if not torch.is_floating_point(tensor):
+        raise TypeError(f"{field_name} must be a floating point tensor")
+    if dtype is not None and tensor.dtype != dtype:
+        raise ValueError(f"{field_name} must share dtype {dtype}, got {tensor.dtype}")
+    if device is not None and tensor.device != device:
+        raise ValueError(
+            f"{field_name} must share device {device}, got {tensor.device}"
+        )
+    if not torch.isfinite(tensor).all().item():
+        raise ValueError(f"{field_name} contains non-finite values")
+
+
+def _format_frame_tensor_shape(shape_suffix: tuple[int | None, ...]) -> str:
+    return ", ".join("D" if dim is None else str(dim) for dim in shape_suffix)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ReferenceMotion:
+    """Tensor-backed reference motion over packed frame tensors."""
 
     root_pos: torch.Tensor
     root_rot: torch.Tensor
@@ -98,7 +251,7 @@ class ReferenceMotionState:
         _validate_float_tensor(self.root_pos, field_name="root_pos", shape_suffix=(3,))
         frame_count = self.root_pos.shape[0]
         if frame_count < 1:
-            raise ValueError("ReferenceMotionState requires at least one frame")
+            raise ValueError("ReferenceMotion requires at least one frame")
         dtype = self.root_pos.dtype
         device = self.root_pos.device
 
@@ -131,11 +284,103 @@ class ReferenceMotionState:
         self._validate_optional_float_field("body_rot", self.body_rot, (None, 4))
         if self.body_rot is not None:
             _validate_quaternion_tensor(self.body_rot, field_name="body_rot")
-        self._validate_optional_float_field("body_lin_vel", self.body_lin_vel, (None, 3))
-        self._validate_optional_float_field("body_ang_vel", self.body_ang_vel, (None, 3))
+        self._validate_optional_float_field(
+            "body_lin_vel", self.body_lin_vel, (None, 3)
+        )
+        self._validate_optional_float_field(
+            "body_ang_vel", self.body_ang_vel, (None, 3)
+        )
         self._validate_optional_contacts()
         self._validate_optional_foot_contacts()
         self._validate_package_metadata()
+
+    @classmethod
+    def from_frames(
+        cls,
+        frames: list[ReferenceFrame],
+        *,
+        name: str | None = None,
+        display_name: str | None = None,
+        fps: float = 30.0,
+        clip_starts: torch.Tensor | None = None,
+        clip_lengths: torch.Tensor | None = None,
+        clip_fps: torch.Tensor | None = None,
+    ) -> "ReferenceMotion":
+        """Construct a tensor-backed reference motion from frame values."""
+        if not frames:
+            raise ValueError("ReferenceMotion.from_frames requires at least one frame")
+        for frame in frames:
+            if not isinstance(frame, ReferenceFrame):
+                raise TypeError("frames must contain ReferenceFrame objects")
+        return cls(
+            name=name,
+            display_name=display_name,
+            fps=fps,
+            root_pos=torch.stack([frame.root_pos for frame in frames]),
+            root_rot=torch.stack([frame.root_rot for frame in frames]),
+            dof_pos=torch.stack([frame.dof_pos for frame in frames]),
+            root_lin_vel=cls._stack_optional_frame_field(frames, "root_lin_vel"),
+            root_ang_vel=cls._stack_optional_frame_field(frames, "root_ang_vel"),
+            dof_vel=cls._stack_optional_frame_field(frames, "dof_vel"),
+            body_pos=cls._stack_optional_frame_field(frames, "body_pos"),
+            body_rot=cls._stack_optional_frame_field(frames, "body_rot"),
+            body_lin_vel=cls._stack_optional_frame_field(frames, "body_lin_vel"),
+            body_ang_vel=cls._stack_optional_frame_field(frames, "body_ang_vel"),
+            body_contacts=cls._stack_optional_frame_field(frames, "body_contacts"),
+            foot_contacts=cls._stack_optional_frame_field(frames, "foot_contacts"),
+            clip_starts=clip_starts,
+            clip_lengths=clip_lengths,
+            clip_fps=clip_fps,
+        )
+
+    @staticmethod
+    def _stack_optional_frame_field(
+        frames: list[ReferenceFrame],
+        field_name: str,
+    ) -> torch.Tensor | None:
+        values = [getattr(frame, field_name) for frame in frames]
+        present = [value is not None for value in values]
+        if not any(present):
+            return None
+        if not all(present):
+            raise ValueError(f"{field_name} must be present on every frame or none")
+        return torch.stack([value for value in values if value is not None])
+
+    def frame(self, index: int) -> ReferenceFrame:
+        """Return one packed reference frame by index."""
+        if not isinstance(index, int):
+            raise TypeError("frame index must be an int")
+        frame_count = self.root_pos.shape[0]
+        if index < 0 or index >= frame_count:
+            raise IndexError(
+                f"frame index {index} out of range for {frame_count} packed frames"
+            )
+        return ReferenceFrame(
+            root_pos=self.root_pos[index],
+            root_rot=self.root_rot[index],
+            dof_pos=self.dof_pos[index],
+            root_lin_vel=self.root_lin_vel[index]
+            if self.root_lin_vel is not None
+            else None,
+            root_ang_vel=self.root_ang_vel[index]
+            if self.root_ang_vel is not None
+            else None,
+            dof_vel=self.dof_vel[index] if self.dof_vel is not None else None,
+            body_pos=self.body_pos[index] if self.body_pos is not None else None,
+            body_rot=self.body_rot[index] if self.body_rot is not None else None,
+            body_lin_vel=self.body_lin_vel[index]
+            if self.body_lin_vel is not None
+            else None,
+            body_ang_vel=self.body_ang_vel[index]
+            if self.body_ang_vel is not None
+            else None,
+            body_contacts=self.body_contacts[index]
+            if self.body_contacts is not None
+            else None,
+            foot_contacts=self.foot_contacts[index]
+            if self.foot_contacts is not None
+            else None,
+        )
 
     def _validate_optional_float_field(
         self,
@@ -173,9 +418,10 @@ class ReferenceMotionState:
                 f"body_contacts must share device {self.root_pos.device}, "
                 f"got {self.body_contacts.device}"
             )
-        if torch.is_floating_point(self.body_contacts) and not torch.isfinite(
-            self.body_contacts
-        ).all().item():
+        if (
+            torch.is_floating_point(self.body_contacts)
+            and not torch.isfinite(self.body_contacts).all().item()
+        ):
             raise ValueError("body_contacts contains non-finite values")
 
     def _validate_optional_foot_contacts(self) -> None:
@@ -255,9 +501,10 @@ class ReferenceMotionState:
             raise ValueError("clip_starts must be non-negative")
         if (self.clip_lengths <= 0).any().item():
             raise ValueError("clip_lengths must be positive")
-        if not torch.isfinite(self.clip_fps).all().item() or (
-            self.clip_fps <= 0.0
-        ).any().item():
+        if (
+            not torch.isfinite(self.clip_fps).all().item()
+            or (self.clip_fps <= 0.0).any().item()
+        ):
             raise ValueError("clip_fps must be positive and finite")
         if not torch.equal(self.clip_fps, torch.round(self.clip_fps)):
             raise ValueError("clip_fps must be integer-valued")
@@ -274,6 +521,9 @@ class ReferenceMotionState:
         total_frames = int(self.clip_lengths.sum().item())
         if total_frames != self.root_pos.shape[0]:
             raise ValueError("clip spans must cover the packed frame tensors")
+
+
+ReferenceMotionState = ReferenceMotion
 
 
 class MotionLoader(ABC):
@@ -345,7 +595,9 @@ class PyrokiMotionLoader(MotionLoader):
         self.motion_files = Path(motion_files)
         self.fps = _validate_integer_fps(fps)
         self.device = torch.device(device)
-        self.contact_labels = Path(contact_labels) if contact_labels is not None else None
+        self.contact_labels = (
+            Path(contact_labels) if contact_labels is not None else None
+        )
 
     def load_motion(self) -> list[ReferenceMotionState]:
         motions = []
@@ -369,7 +621,9 @@ class PyrokiMotionLoader(MotionLoader):
     def _motion_paths(self) -> list[Path]:
         if self.motion_files.is_file():
             if self.motion_files.suffix != ".npz":
-                raise ValueError(f"Expected a .npz PyRoki motion file, got {self.motion_files}")
+                raise ValueError(
+                    f"Expected a .npz PyRoki motion file, got {self.motion_files}"
+                )
             return [self.motion_files]
 
         if self.motion_files.is_dir():
@@ -379,7 +633,9 @@ class PyrokiMotionLoader(MotionLoader):
                 if path.is_file() and path.suffix == ".npz"
             )
             if not motion_paths:
-                raise ValueError(f"No direct child .npz files found in {self.motion_files}")
+                raise ValueError(
+                    f"No direct child .npz files found in {self.motion_files}"
+                )
             return motion_paths
 
         raise FileNotFoundError(f"Motion path does not exist: {self.motion_files}")
@@ -562,7 +818,9 @@ class ReferenceMotionNpzLoader(MotionLoader):
                 if path.is_file() and path.suffix == ".npz"
             )
             if not motion_paths:
-                raise ValueError(f"No direct child .npz files found in {self.motion_files}")
+                raise ValueError(
+                    f"No direct child .npz files found in {self.motion_files}"
+                )
             return motion_paths
 
         raise FileNotFoundError(f"Motion path does not exist: {self.motion_files}")
@@ -613,11 +871,11 @@ class ReferenceMotionNpzLoader(MotionLoader):
             return None
         array = np.asarray(data["body_contacts"])
         if not (
-            np.issubdtype(array.dtype, np.bool_) or np.issubdtype(array.dtype, np.number)
+            np.issubdtype(array.dtype, np.bool_)
+            or np.issubdtype(array.dtype, np.number)
         ):
             raise ValueError(
-                "'body_contacts' must be bool or numeric, "
-                f"got dtype {array.dtype}"
+                f"'body_contacts' must be bool or numeric, got dtype {array.dtype}"
             )
         if np.issubdtype(array.dtype, np.floating) and not np.all(np.isfinite(array)):
             raise ValueError("'body_contacts' contains non-finite values")

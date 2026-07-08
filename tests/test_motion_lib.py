@@ -392,6 +392,8 @@ def test_motion_lib_public_exports_construct_astro_pyroki_pipeline() -> None:
         "MotionLibCfg",
         "MotionManager",
         "MotionManagerCfg",
+        "ReferenceFrame",
+        "ReferenceMotion",
         "ReferenceMotionSample",
         "ReferenceMotionState",
         "TimeSampling",

@@ -25,6 +25,8 @@ def _load_motion_loader_module() -> ModuleType:
 
 
 _motion_loader = _load_motion_loader_module()
+ReferenceFrame = _motion_loader.ReferenceFrame
+ReferenceMotion = _motion_loader.ReferenceMotion
 ReferenceMotionState = _motion_loader.ReferenceMotionState
 
 
@@ -32,7 +34,57 @@ def _identity_root_rot(num_frames: int) -> torch.Tensor:
     return torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(num_frames, 1)
 
 
-def test_reference_motion_state_defaults_to_30_fps_and_preserves_required_tensors() -> None:
+def test_reference_motion_state_is_compatibility_alias_for_reference_motion() -> None:
+    from mjlab_playground.motion_lib import ReferenceMotion as ExportedReferenceMotion
+    from mjlab_playground.motion_lib import (
+        ReferenceMotionState as ExportedReferenceMotionState,
+    )
+
+    assert ReferenceMotionState is ReferenceMotion
+    assert ExportedReferenceMotionState is ExportedReferenceMotion
+
+
+def test_reference_frame_accepts_one_timestep_fields() -> None:
+    frame = ReferenceFrame(
+        root_pos=torch.zeros(3),
+        root_rot=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+        dof_pos=torch.zeros(29),
+        root_lin_vel=torch.ones(3),
+        root_ang_vel=torch.full((3,), 2.0),
+        dof_vel=torch.full((29,), 3.0),
+        body_pos=torch.zeros(31, 3),
+        body_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(31, 1),
+        body_lin_vel=torch.ones(31, 3),
+        body_ang_vel=torch.full((31, 3), 2.0),
+        body_contacts=torch.zeros(31, dtype=torch.bool),
+        foot_contacts=torch.tensor([1.0, 0.0]),
+    )
+
+    assert frame.root_pos.shape == (3,)
+    assert frame.dof_pos.shape == (29,)
+    assert frame.body_contacts is not None
+    assert frame.body_contacts.shape == (31,)
+
+
+def test_reference_frame_rejects_invalid_timestep_fields() -> None:
+    with pytest.raises(ValueError, match="root_pos must have shape"):
+        ReferenceFrame(
+            root_pos=torch.zeros(1, 3),
+            root_rot=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+            dof_pos=torch.zeros(29),
+        )
+
+    with pytest.raises(ValueError, match="root_rot quaternions must be normalized"):
+        ReferenceFrame(
+            root_pos=torch.zeros(3),
+            root_rot=torch.ones(4),
+            dof_pos=torch.zeros(29),
+        )
+
+
+def test_reference_motion_state_defaults_to_30_fps_and_preserves_required_tensors() -> (
+    None
+):
     root_pos = torch.zeros(3, 3)
     root_rot = _identity_root_rot(3)
     dof_pos = torch.zeros(3, 29)
@@ -72,6 +124,144 @@ def test_reference_motion_state_accepts_full_reference_motion_fields() -> None:
     assert state.body_pos.shape == (4, 31, 3)
     assert state.body_contacts is not None
     assert state.body_contacts.dtype == torch.bool
+
+
+def test_reference_motion_frame_extracts_single_reference_frame() -> None:
+    motion = ReferenceMotion(
+        fps=50.0,
+        root_pos=torch.arange(12, dtype=torch.float32).reshape(4, 3),
+        root_rot=_identity_root_rot(4),
+        dof_pos=torch.arange(12, dtype=torch.float32).reshape(4, 3),
+        root_lin_vel=torch.ones(4, 3),
+        root_ang_vel=torch.full((4, 3), 2.0),
+        dof_vel=torch.full((4, 3), 3.0),
+        body_pos=torch.arange(24, dtype=torch.float32).reshape(4, 2, 3),
+        body_rot=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(4, 2, 1),
+        body_lin_vel=torch.full((4, 2, 3), 4.0),
+        body_ang_vel=torch.full((4, 2, 3), 5.0),
+        body_contacts=torch.tensor(
+            [[True, False], [False, True], [True, True], [False, False]]
+        ),
+        foot_contacts=torch.tensor([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0], [1.0, 1.0]]),
+        clip_starts=torch.tensor([0]),
+        clip_lengths=torch.tensor([4]),
+        clip_fps=torch.tensor([50.0]),
+    )
+
+    frame = motion.frame(2)
+
+    assert isinstance(frame, ReferenceFrame)
+    torch.testing.assert_close(frame.root_pos, motion.root_pos[2])
+    torch.testing.assert_close(frame.root_rot, motion.root_rot[2])
+    torch.testing.assert_close(frame.dof_pos, motion.dof_pos[2])
+    torch.testing.assert_close(frame.root_lin_vel, motion.root_lin_vel[2])
+    torch.testing.assert_close(frame.root_ang_vel, motion.root_ang_vel[2])
+    torch.testing.assert_close(frame.dof_vel, motion.dof_vel[2])
+    torch.testing.assert_close(frame.body_pos, motion.body_pos[2])
+    torch.testing.assert_close(frame.body_rot, motion.body_rot[2])
+    torch.testing.assert_close(frame.body_lin_vel, motion.body_lin_vel[2])
+    torch.testing.assert_close(frame.body_ang_vel, motion.body_ang_vel[2])
+    torch.testing.assert_close(frame.body_contacts, motion.body_contacts[2])
+    torch.testing.assert_close(frame.foot_contacts, motion.foot_contacts[2])
+    assert not hasattr(frame, "clip_starts")
+
+
+@pytest.mark.parametrize("frame_index", [-1, 4])
+def test_reference_motion_frame_rejects_out_of_range_indices(frame_index: int) -> None:
+    motion = ReferenceMotion(
+        root_pos=torch.zeros(4, 3),
+        root_rot=_identity_root_rot(4),
+        dof_pos=torch.zeros(4, 3),
+    )
+
+    with pytest.raises(IndexError, match=f"frame index {frame_index} out of range"):
+        motion.frame(frame_index)
+
+
+def test_reference_motion_from_frames_reconstructs_tensor_backed_motion() -> None:
+    frames = [
+        ReferenceFrame(
+            root_pos=torch.tensor([1.0, 2.0, 3.0]),
+            root_rot=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+            dof_pos=torch.tensor([0.1, 0.2]),
+            root_lin_vel=torch.tensor([1.0, 0.0, 0.0]),
+            root_ang_vel=torch.tensor([0.0, 1.0, 0.0]),
+            dof_vel=torch.tensor([0.3, 0.4]),
+            body_pos=torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+            body_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+            body_lin_vel=torch.zeros(2, 3),
+            body_ang_vel=torch.ones(2, 3),
+            body_contacts=torch.tensor([True, False]),
+            foot_contacts=torch.tensor([1.0, 0.0]),
+        ),
+        ReferenceFrame(
+            root_pos=torch.tensor([4.0, 5.0, 6.0]),
+            root_rot=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+            dof_pos=torch.tensor([0.5, 0.6]),
+            root_lin_vel=torch.tensor([0.0, 1.0, 0.0]),
+            root_ang_vel=torch.tensor([0.0, 0.0, 1.0]),
+            dof_vel=torch.tensor([0.7, 0.8]),
+            body_pos=torch.tensor([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]),
+            body_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+            body_lin_vel=torch.ones(2, 3),
+            body_ang_vel=torch.full((2, 3), 2.0),
+            body_contacts=torch.tensor([False, True]),
+            foot_contacts=torch.tensor([0.0, 1.0]),
+        ),
+    ]
+
+    motion = ReferenceMotion.from_frames(
+        frames,
+        name="walk.npz",
+        display_name="walk",
+        fps=60.0,
+        clip_starts=torch.tensor([0]),
+        clip_lengths=torch.tensor([2]),
+        clip_fps=torch.tensor([60.0]),
+    )
+
+    assert motion.name == "walk.npz"
+    assert motion.display_name == "walk"
+    assert motion.fps == 60.0
+    torch.testing.assert_close(
+        motion.root_pos, torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    )
+    torch.testing.assert_close(motion.dof_pos, torch.tensor([[0.1, 0.2], [0.5, 0.6]]))
+    assert motion.body_pos is not None
+    assert motion.body_pos.shape == (2, 2, 3)
+    assert motion.body_contacts is not None
+    torch.testing.assert_close(
+        motion.body_contacts, torch.tensor([[True, False], [False, True]])
+    )
+    torch.testing.assert_close(motion.clip_starts, torch.tensor([0]))
+    torch.testing.assert_close(motion.clip_lengths, torch.tensor([2]))
+    torch.testing.assert_close(motion.clip_fps, torch.tensor([60.0]))
+
+
+def test_reference_motion_from_frames_requires_compatible_optional_fields() -> None:
+    frames = [
+        ReferenceFrame(
+            root_pos=torch.zeros(3),
+            root_rot=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+            dof_pos=torch.zeros(2),
+            body_pos=torch.zeros(1, 3),
+        ),
+        ReferenceFrame(
+            root_pos=torch.ones(3),
+            root_rot=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+            dof_pos=torch.ones(2),
+        ),
+    ]
+
+    with pytest.raises(
+        ValueError, match="body_pos must be present on every frame or none"
+    ):
+        ReferenceMotion.from_frames(frames)
+
+
+def test_reference_motion_from_frames_rejects_empty_input() -> None:
+    with pytest.raises(ValueError, match="requires at least one frame"):
+        ReferenceMotion.from_frames([])
 
 
 def test_reference_motion_state_accepts_valid_multi_clip_package_metadata() -> None:
@@ -128,9 +318,7 @@ def test_reference_motion_state_rejects_bad_source_foot_contacts() -> None:
             root_pos=torch.zeros(3, 3),
             root_rot=_identity_root_rot(3),
             dof_pos=torch.zeros(3, 29),
-            foot_contacts=torch.tensor(
-                [[1.0, 0.0], [float("nan"), 0.5], [0.0, 1.0]]
-            ),
+            foot_contacts=torch.tensor([[1.0, 0.0], [float("nan"), 0.5], [0.0, 1.0]]),
         )
 
 
@@ -283,7 +471,9 @@ def test_reference_motion_state_accepts_small_sampled_batches_without_package_me
     assert state.clip_fps is None
 
 
-def test_reference_motion_state_rejects_shape_dtype_device_and_finite_mismatches() -> None:
+def test_reference_motion_state_rejects_shape_dtype_device_and_finite_mismatches() -> (
+    None
+):
     with pytest.raises(ValueError, match="root_pos must have shape"):
         ReferenceMotionState(
             root_pos=torch.zeros(3, 4),
