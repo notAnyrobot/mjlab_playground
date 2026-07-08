@@ -1,21 +1,59 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import torch
 
-from .astro_enrichment_adapter import AstroSimulatorEnrichmentAdapter
 from .motion_loader import (
     MotionFormat,
     MotionLoader,
+    ReferenceFrame,
+    ReferenceMotion,
     ReferenceMotionState,
     _validate_integer_fps,
 )
 from .motion_resampler import MotionResamplingCfg, ReferenceMotionResampler
+from .mujoco_scene_adapter import MujocoSceneAdapter, MujocoSceneAdapterCfg
 
 MotionLibRobot = Literal["astro"]
+
+
+def _load_astro_constants_module() -> Any:
+    module_name = "_mjlab_playground_motion_lib_astro_constants"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    src_path = Path(__file__).resolve().parents[1]
+    constants_path = src_path / "asset_zoo" / "robots" / "astro" / "astro_constants.py"
+    spec = importlib.util.spec_from_file_location(module_name, constants_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load Astro constants from {constants_path}")
+
+    existing_package = sys.modules.get("mjlab_playground")
+    installed_stub = existing_package is None
+    if installed_stub:
+        package_stub = types.ModuleType("mjlab_playground")
+        package_stub.__dict__["MJLAB_PLAYGROUND_SRC_PATH"] = src_path
+        package_stub.__path__ = [str(src_path)]  # type: ignore[attr-defined]
+        sys.modules["mjlab_playground"] = package_stub
+
+    try:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    finally:
+        if installed_stub:
+            sys.modules.pop("mjlab_playground", None)
+
+    return module
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -32,7 +70,9 @@ class MotionLibCfg:
         if self.robot != "astro":
             raise ValueError("Only robot='astro' is supported by MotionLib v1")
         if self.source_format == "proto":
-            raise NotImplementedError("proto source format is reserved but not implemented")
+            raise NotImplementedError(
+                "proto source format is reserved but not implemented"
+            )
         if self.source_format != "pyroki":
             raise ValueError("Only source_format='pyroki' is supported by MotionLib v1")
         object.__setattr__(
@@ -139,16 +179,12 @@ class MotionLib:
         selected_clip_lengths = clip_lengths[motion_ids]
         clip_durations = (
             selected_clip_lengths.to(motion_times.dtype) - 1.0
-        ) / selected_clip_fps.to(
-            motion_times.dtype
-        )
+        ) / selected_clip_fps.to(motion_times.dtype)
         if ((motion_times < 0.0) | (motion_times > clip_durations)).any().item():
             raise ValueError("motion_times contains out-of-range clip-local times")
 
         frame_positions = motion_times * selected_clip_fps.to(motion_times.dtype)
-        local_lower = torch.floor(frame_positions).to(
-            dtype=torch.long
-        )
+        local_lower = torch.floor(frame_positions).to(dtype=torch.long)
         local_upper = torch.minimum(local_lower + 1, selected_clip_lengths - 1)
         blend = frame_positions - local_lower.to(dtype=frame_positions.dtype)
         lower_indices = clip_starts[motion_ids] + local_lower
@@ -252,7 +288,9 @@ class MotionLib:
     ) -> torch.Tensor | None:
         if values is None:
             return None
-        return MotionLib._lerp_indexed_values(values, lower_indices, upper_indices, blend)
+        return MotionLib._lerp_indexed_values(
+            values, lower_indices, upper_indices, blend
+        )
 
     @staticmethod
     def _lerp_indexed_values(
@@ -263,9 +301,10 @@ class MotionLib:
     ) -> torch.Tensor:
         view_shape = (-1,) + (1,) * (values.ndim - 1)
         blend_view = blend.reshape(view_shape)
-        return values[lower_indices] * (1.0 - blend_view) + values[
-            upper_indices
-        ] * blend_view
+        return (
+            values[lower_indices] * (1.0 - blend_view)
+            + values[upper_indices] * blend_view
+        )
 
     @staticmethod
     def _maybe_slerp_indexed_quaternions_wxyz(
@@ -325,13 +364,50 @@ class MotionLib:
         rich_motions = []
         for motion in motions:
             try:
-                rich_motion = adapter.enrich(motion)
+                rich_motion = self._enrich_motion(adapter, motion)
                 self._validate_enrich_output(motion, rich_motion)
             except Exception as exc:
                 identifier = self._motion_identifier(motion)
                 raise type(exc)(f"{identifier}: {exc}") from exc
             rich_motions.append(rich_motion)
         return rich_motions
+
+    def _enrich_motion(
+        self,
+        adapter: Any,
+        motion: ReferenceMotionState,
+    ) -> ReferenceMotionState:
+        frames: list[ReferenceFrame] = []
+        frame_count = int(motion.root_pos.shape[0])
+        for frame_index in range(frame_count):
+            source_frame = motion.frame(frame_index)
+            adapter.apply_frame(source_frame)
+            rich_frame = adapter.read_robot_state()
+            frames.append(
+                ReferenceFrame(
+                    root_pos=rich_frame.root_pos,
+                    root_rot=rich_frame.root_rot,
+                    dof_pos=rich_frame.dof_pos,
+                    root_lin_vel=rich_frame.root_lin_vel,
+                    root_ang_vel=rich_frame.root_ang_vel,
+                    dof_vel=rich_frame.dof_vel,
+                    body_pos=rich_frame.body_pos,
+                    body_rot=rich_frame.body_rot,
+                    body_lin_vel=rich_frame.body_lin_vel,
+                    body_ang_vel=rich_frame.body_ang_vel,
+                    body_contacts=source_frame.body_contacts,
+                    foot_contacts=source_frame.foot_contacts,
+                )
+            )
+        return ReferenceMotion.from_frames(
+            frames,
+            name=motion.name,
+            display_name=motion.display_name,
+            fps=motion.fps,
+            clip_starts=motion.clip_starts,
+            clip_lengths=motion.clip_lengths,
+            clip_fps=motion.clip_fps,
+        )
 
     def _validate_enrich_input(self, motion: ReferenceMotionState) -> None:
         if motion.fps != self.cfg.output_fps:
@@ -363,18 +439,29 @@ class MotionLib:
     ) -> None:
         if not isinstance(rich_motion, ReferenceMotionState):
             raise TypeError(
-                "Astro enrichment adapter must return ReferenceMotionState objects"
+                "MotionLib.enrich must return ReferenceMotionState objects"
             )
         for field_name in self._ENRICH_OUTPUT_BODY_FIELDS:
             if getattr(rich_motion, field_name) is None:
                 identifier = self._motion_identifier(source_motion)
                 raise ValueError(
-                    f"{identifier}: Astro enrichment adapter did not fill {field_name}"
+                    f"{identifier}: MuJoCo scene adapter did not fill {field_name}"
                 )
 
     def _get_enrichment_adapter(self) -> Any:
         if self._enrichment_adapter is None:
-            self._enrichment_adapter = AstroSimulatorEnrichmentAdapter.create(
-                device=self.cfg.device
+            mujoco_scene_cfg = MujocoSceneAdapterCfg(
+                robot_cfg=self._robot_cfg(),
+                output_fps=self.cfg.output_fps,
+                device=self.cfg.device,
             )
+            mujoco_scene_adapter = MujocoSceneAdapter(mujoco_scene_cfg)
+            self._enrichment_adapter = mujoco_scene_adapter
         return self._enrichment_adapter
+
+    def _robot_cfg(self) -> Any:
+        if self.cfg.robot == "astro":
+            return _load_astro_constants_module().get_astro_robot_cfg()
+        raise ValueError(
+            f"Unsupported robot {self.cfg.robot!r}. Supported robots: astro"
+        )

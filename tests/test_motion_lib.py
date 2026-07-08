@@ -4,6 +4,7 @@ import dataclasses
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -40,9 +41,7 @@ def _reference_motion(*, fps: float = 60.0, name: str = "walk_retargeted.npz"):
         name=name,
         display_name=name.removesuffix(".npz"),
         fps=fps,
-        root_pos=torch.tensor(
-            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]
-        ),
+        root_pos=torch.tensor([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]),
         root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
         dof_pos=torch.tensor([[0.0, 1.0], [0.5, 1.5], [1.0, 2.0]]),
         root_lin_vel=torch.tensor([[30.0, 0.0, 0.0]] * 3),
@@ -87,23 +86,21 @@ def _package_reference_motion():
 
 def _z_quat(degrees: float) -> torch.Tensor:
     radians = math.radians(degrees)
-    return torch.tensor(
-        [math.cos(radians / 2.0), 0.0, 0.0, math.sin(radians / 2.0)]
-    )
+    return torch.tensor([math.cos(radians / 2.0), 0.0, 0.0, math.sin(radians / 2.0)])
 
 
 def _reject_adapter_creation(monkeypatch: pytest.MonkeyPatch) -> None:
     import mjlab_playground.motion_lib.motion_lib as motion_lib_module
 
-    class RejectingAstroAdapter:
-        @classmethod
-        def create(cls, *, device: torch.device):
+    class RejectingMujocoSceneAdapter:
+        def __init__(self, *args, **kwargs) -> None:
             raise AssertionError("invalid enrich input should not create adapter")
 
     monkeypatch.setattr(
         motion_lib_module,
-        "AstroSimulatorEnrichmentAdapter",
-        RejectingAstroAdapter,
+        "MujocoSceneAdapter",
+        RejectingMujocoSceneAdapter,
+        raising=False,
     )
 
 
@@ -159,9 +156,7 @@ def test_motion_lib_query_interpolates_clip_local_times() -> None:
     motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
     package = ReferenceMotionState(
         fps=10.0,
-        root_pos=torch.tensor(
-            [[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [2.0, 4.0, 0.0]]
-        ),
+        root_pos=torch.tensor([[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [2.0, 4.0, 0.0]]),
         root_rot=torch.stack([_z_quat(0.0), _z_quat(90.0), _z_quat(180.0)]),
         dof_pos=torch.tensor([[0.0, 10.0], [2.0, 20.0], [4.0, 30.0]]),
     )
@@ -228,12 +223,8 @@ def test_motion_lib_query_interpolates_optional_reference_fields() -> None:
         root_pos=torch.zeros(3, 3),
         root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
         dof_pos=torch.zeros(3, 2),
-        root_lin_vel=torch.tensor(
-            [[0.0, 0.0, 0.0], [2.0, 4.0, 0.0], [4.0, 8.0, 0.0]]
-        ),
-        root_ang_vel=torch.tensor(
-            [[0.0, 0.0, 0.0], [0.0, 2.0, 4.0], [0.0, 4.0, 8.0]]
-        ),
+        root_lin_vel=torch.tensor([[0.0, 0.0, 0.0], [2.0, 4.0, 0.0], [4.0, 8.0, 0.0]]),
+        root_ang_vel=torch.tensor([[0.0, 0.0, 0.0], [0.0, 2.0, 4.0], [0.0, 4.0, 8.0]]),
         dof_vel=torch.tensor([[0.0, 10.0], [2.0, 20.0], [4.0, 30.0]]),
         body_pos=torch.tensor(
             [
@@ -500,11 +491,11 @@ def test_motion_lib_resamples_loaded_source_clip_to_output_fps(
     )
     torch.testing.assert_close(
         motion.dof_pos,
-        torch.tensor(
-            [[0.0, 1.0], [0.25, 1.25], [0.5, 1.5], [0.75, 1.75], [1.0, 2.0]]
-        ),
+        torch.tensor([[0.0, 1.0], [0.25, 1.25], [0.5, 1.5], [0.75, 1.75], [1.0, 2.0]]),
     )
-    torch.testing.assert_close(motion.root_lin_vel, torch.tensor([[15.0, 0.0, 0.0]] * 5))
+    torch.testing.assert_close(
+        motion.root_lin_vel, torch.tensor([[15.0, 0.0, 0.0]] * 5)
+    )
     torch.testing.assert_close(motion.root_ang_vel, torch.zeros(5, 3))
     torch.testing.assert_close(motion.dof_vel, torch.tensor([[15.0, 15.0]] * 5))
 
@@ -525,7 +516,9 @@ def test_motion_lib_resample_rejects_contact_bearing_clip_with_name(
         foot_contacts=torch.zeros(source_motion.root_pos.shape[0], 2),
     )
 
-    with pytest.raises(ValueError, match="contact_walk_retargeted\\.npz.*foot_contacts"):
+    with pytest.raises(
+        ValueError, match="contact_walk_retargeted\\.npz.*foot_contacts"
+    ):
         motion_lib.resample([contact_motion])
 
 
@@ -557,33 +550,54 @@ def test_motion_lib_full_pipeline_enriches_resampled_clip_without_writing_artifa
     motion_path = tmp_path / "walk_retargeted.npz"
     _write_pyroki_npz(motion_path)
 
-    class FakeAstroAdapter:
-        create_calls = 0
+    class FakeMujocoSceneAdapter:
+        init_calls = []
 
-        @classmethod
-        def create(cls, *, device: torch.device) -> "FakeAstroAdapter":
-            cls.create_calls += 1
-            assert device == torch.device("cpu")
-            return cls()
+        def __init__(self, cfg) -> None:
+            from mjlab_playground.motion_lib import ReferenceFrame
 
-        def enrich(self, motion):
-            assert motion.fps == 60.0
-            assert motion.root_lin_vel is not None
-            assert motion.root_ang_vel is not None
-            assert motion.dof_vel is not None
-            frames = motion.root_pos.shape[0]
-            return dataclasses.replace(
-                motion,
-                body_pos=torch.ones(frames, 2, 3),
-                body_rot=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(frames, 2, 1),
-                body_lin_vel=torch.full((frames, 2, 3), 2.0),
-                body_ang_vel=torch.full((frames, 2, 3), 3.0),
+            self.init_calls.append(
+                {
+                    "robot_cfg": cfg.robot_cfg,
+                    "output_fps": cfg.output_fps,
+                    "device": cfg.device,
+                }
+            )
+            self._reference_frame_cls = ReferenceFrame
+            self.current_frame = None
+
+        def apply_frame(self, frame):
+            assert frame.root_lin_vel is not None
+            assert frame.root_ang_vel is not None
+            assert frame.dof_vel is not None
+            self.current_frame = frame
+
+        def read_robot_state(self):
+            frame = self.current_frame
+            assert frame is not None
+            return self._reference_frame_cls(
+                root_pos=frame.root_pos,
+                root_rot=frame.root_rot,
+                dof_pos=frame.dof_pos,
+                root_lin_vel=frame.root_lin_vel,
+                root_ang_vel=frame.root_ang_vel,
+                dof_vel=frame.dof_vel,
+                body_pos=torch.ones(2, 3),
+                body_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(2, 1),
+                body_lin_vel=torch.full((2, 3), 2.0),
+                body_ang_vel=torch.full((2, 3), 3.0),
             )
 
     monkeypatch.setattr(
         motion_lib_module,
-        "AstroSimulatorEnrichmentAdapter",
-        FakeAstroAdapter,
+        "MujocoSceneAdapter",
+        FakeMujocoSceneAdapter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        motion_lib_module,
+        "_load_astro_constants_module",
+        lambda: SimpleNamespace(get_astro_robot_cfg=lambda: "astro-robot-cfg"),
         raising=False,
     )
     motion_lib = MotionLib(
@@ -592,7 +606,13 @@ def test_motion_lib_full_pipeline_enriches_resampled_clip_without_writing_artifa
 
     rich_motions = motion_lib.enrich(motion_lib.resample(motion_lib.load(motion_path)))
 
-    assert FakeAstroAdapter.create_calls == 1
+    assert FakeMujocoSceneAdapter.init_calls == [
+        {
+            "robot_cfg": "astro-robot-cfg",
+            "output_fps": 60.0,
+            "device": torch.device("cpu"),
+        }
+    ]
     assert len(rich_motions) == 1
     rich = rich_motions[0]
     assert rich.name == "walk_retargeted.npz"
@@ -677,27 +697,46 @@ def test_motion_lib_enrich_batch_failure_names_offending_clip(
     import mjlab_playground.motion_lib.motion_lib as motion_lib_module
     from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
 
-    class FailingAstroAdapter:
-        @classmethod
-        def create(cls, *, device: torch.device) -> "FailingAstroAdapter":
-            return cls()
+    class FailingMujocoSceneAdapter:
+        def __init__(self, cfg) -> None:
+            self.read_count = 0
+            self.current_frame = None
 
-        def enrich(self, motion):
-            if motion.name == "bad_walk.npz":
+        def apply_frame(self, frame):
+            self.current_frame = frame
+
+        def read_robot_state(self):
+            from mjlab_playground.motion_lib import ReferenceFrame
+
+            self.read_count += 1
+            if self.read_count > 3:
                 raise RuntimeError("simulator rejected pose")
-            frames = motion.root_pos.shape[0]
-            return dataclasses.replace(
-                motion,
-                body_pos=torch.ones(frames, 1, 3),
-                body_rot=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(frames, 1, 1),
-                body_lin_vel=torch.zeros(frames, 1, 3),
-                body_ang_vel=torch.zeros(frames, 1, 3),
+            frame = self.current_frame
+            assert frame is not None
+            return ReferenceFrame(
+                root_pos=frame.root_pos,
+                root_rot=frame.root_rot,
+                dof_pos=frame.dof_pos,
+                root_lin_vel=frame.root_lin_vel,
+                root_ang_vel=frame.root_ang_vel,
+                dof_vel=frame.dof_vel,
+                body_pos=torch.ones(1, 3),
+                body_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+                body_lin_vel=torch.zeros(1, 3),
+                body_ang_vel=torch.zeros(1, 3),
             )
 
     monkeypatch.setattr(
         motion_lib_module,
-        "AstroSimulatorEnrichmentAdapter",
-        FailingAstroAdapter,
+        "MujocoSceneAdapter",
+        FailingMujocoSceneAdapter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        motion_lib_module,
+        "_load_astro_constants_module",
+        lambda: SimpleNamespace(get_astro_robot_cfg=lambda: "astro-robot-cfg"),
+        raising=False,
     )
     motion_lib = MotionLib(MotionLibCfg(output_fps=60.0))
 

@@ -22,12 +22,7 @@ LAUNCH_MOTION_VIEWER_PATH = (
 )
 LAUNCH_MOTION_VIEWER_MODULE = "mjlab_playground.motion_lib.scripts.launch_motion_viewer"
 LEGACY_MOTION_VIEWER_PATH = (
-    ROOT
-    / "src"
-    / "mjlab_playground"
-    / "motion_lib"
-    / "tools"
-    / "motion_viewer.py"
+    ROOT / "src" / "mjlab_playground" / "motion_lib" / "tools" / "motion_viewer.py"
 )
 
 
@@ -145,7 +140,9 @@ def test_motion_viewer_main_rejects_headless_without_recording(tmp_path: Path) -
     motion_viewer_main = _launch_motion_viewer.main
 
     try:
-        motion_viewer_main(["--motion-files", str(tmp_path / "motion.npz"), "--headless"])
+        motion_viewer_main(
+            ["--motion-files", str(tmp_path / "motion.npz"), "--headless"]
+        )
     except SystemExit as exc:
         assert exc.code == 2
     else:
@@ -246,8 +243,46 @@ def test_create_motion_viewer_loads_motions_and_builds_selected_robot_adapter(
     )
     assert calls["scene_adapter_builder"] == (
         ("astro",),
-        {"device": "cpu"},
+        {"output_fps": 50.0, "device": "cpu"},
     )
+
+
+def test_build_scene_adapter_resolves_astro_config_for_mujoco_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {}
+
+    class FakeMujocoSceneAdapter:
+        def __init__(self, cfg) -> None:
+            calls["adapter_init"] = {
+                "robot_cfg": cfg.robot_cfg,
+                "output_fps": cfg.output_fps,
+                "device": cfg.device,
+            }
+
+    monkeypatch.setattr(
+        _launch_motion_viewer,
+        "_load_astro_constants_module",
+        lambda: SimpleNamespace(get_astro_robot_cfg=lambda: "astro-robot-cfg"),
+    )
+    monkeypatch.setattr(
+        _launch_motion_viewer,
+        "MujocoSceneAdapter",
+        FakeMujocoSceneAdapter,
+    )
+
+    adapter = _launch_motion_viewer.build_scene_adapter(
+        "astro",
+        output_fps=50.0,
+        device="cuda:0",
+    )
+
+    assert isinstance(adapter, FakeMujocoSceneAdapter)
+    assert calls["adapter_init"] == {
+        "robot_cfg": "astro-robot-cfg",
+        "output_fps": 50.0,
+        "device": "cuda:0",
+    }
 
 
 def test_motion_viewer_main_launches_interactive_viewer(tmp_path: Path) -> None:
@@ -295,8 +330,7 @@ def test_motion_viewer_main_reports_terminal_status_by_default(
 
     assert (
         "\rMotion 1/1 | walking | [--------------------] "
-        "0/3 (0.0%) | speed 1x | playing"
-        in capsys.readouterr().out
+        "0/3 (0.0%) | speed 1x | playing" in capsys.readouterr().out
     )
 
 
@@ -464,7 +498,9 @@ def test_motion_viewer_main_records_headless_batch_and_does_not_run_interactive(
             return []
 
         def run_interactive(self, **kwargs):
-            raise AssertionError("headless recording must not launch interactive playback")
+            raise AssertionError(
+                "headless recording must not launch interactive playback"
+            )
 
     _launch_motion_viewer.main(
         [
@@ -547,12 +583,17 @@ def test_verify_motion_viewer_path_loads_pyroki_builds_astro_and_applies_one_fra
         scene_adapter_builder=build_adapter,
     )
 
-    assert calls["build_adapter"] == (("astro",), {"device": "cpu"})
+    assert calls["build_adapter"] == (
+        ("astro",),
+        {"output_fps": 30.0, "device": "cpu"},
+    )
     assert len(viewer.motions) == 1
     assert scene_adapter.applied == [(viewer.motions[0], 0)]
 
 
-def test_verify_motion_viewer_path_labels_bad_pyroki_source_data(tmp_path: Path) -> None:
+def test_verify_motion_viewer_path_labels_bad_pyroki_source_data(
+    tmp_path: Path,
+) -> None:
     motion_path = tmp_path / "bad.npz"
     np.savez(motion_path, base_frame_pos=np.zeros((1, 3)))
 
@@ -657,6 +698,36 @@ def test_launch_motion_viewer_runner_help_avoids_task_registration_imports() -> 
     assert "--camera-azimuth" not in result.stdout
     assert "--smoke-test" in result.stdout
     assert "rsl_rl" not in result.stderr
+
+
+def test_launch_motion_viewer_import_does_not_import_legacy_astro_adapter() -> None:
+    env = os.environ.copy()
+    src_path = str(ROOT / "src")
+    env["PYTHONPATH"] = (
+        src_path
+        if not env.get("PYTHONPATH")
+        else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+    )
+    code = (
+        "import sys; "
+        f"import {LAUNCH_MOTION_VIEWER_MODULE}; "
+        "forbidden = ["
+        "'mjlab_playground.motion_lib.astro_scene_adapter'"
+        "]; "
+        "print([name for name in forbidden if name in sys.modules])"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]"
 
 
 def test_legacy_motion_viewer_script_is_retired() -> None:

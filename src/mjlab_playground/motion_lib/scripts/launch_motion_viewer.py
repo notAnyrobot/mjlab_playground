@@ -4,15 +4,11 @@ import argparse
 import importlib.util
 import subprocess
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from mjlab_playground.motion_lib.astro_scene_adapter import (
-    ROBOT_CHOICES,
-    AstroMujocoSceneAdapter,
-    build_scene_adapter,
-)
 from mjlab_playground.motion_lib.motion_viewer import (
     PLAYBACK_SPEEDS,
     PlaybackController,
@@ -22,9 +18,12 @@ from mjlab_playground.motion_lib.motion_viewer import (
 from mjlab_playground.motion_lib.motion_viewer import (
     MotionViewer as BaseMotionViewer,
 )
+from mjlab_playground.motion_lib.mujoco_scene_adapter import (
+    MujocoSceneAdapter,
+    MujocoSceneAdapterCfg,
+)
 
 __all__ = [
-    "AstroMujocoSceneAdapter",
     "DEFAULT_CAMERA_CONFIG",
     "ViewerCameraConfig",
     "MotionViewer",
@@ -42,6 +41,7 @@ __all__ = [
 ]
 
 MOTION_FORMAT_CHOICES = ("pyroki", "proto", "mjlab")
+ROBOT_CHOICES = ("astro",)
 
 
 @dataclass(frozen=True)
@@ -98,6 +98,60 @@ def _load_recording_module() -> Any:
         raise
 
     return module
+
+
+def _load_astro_constants_module() -> Any:
+    module_name = "_mjlab_playground_motion_viewer_astro_constants"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    src_path = Path(__file__).resolve().parents[2]
+    constants_path = src_path / "asset_zoo" / "robots" / "astro" / "astro_constants.py"
+    spec = importlib.util.spec_from_file_location(module_name, constants_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load Astro constants from {constants_path}")
+
+    existing_package = sys.modules.get("mjlab_playground")
+    installed_stub = existing_package is None
+    if installed_stub:
+        package_stub = types.ModuleType("mjlab_playground")
+        package_stub.__dict__["MJLAB_PLAYGROUND_SRC_PATH"] = src_path
+        package_stub.__path__ = [str(src_path)]  # type: ignore[attr-defined]
+        sys.modules["mjlab_playground"] = package_stub
+
+    try:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    finally:
+        if installed_stub:
+            sys.modules.pop("mjlab_playground", None)
+
+    return module
+
+
+def build_scene_adapter(
+    robot: str,
+    *,
+    output_fps: float,
+    device: str = "cpu",
+) -> SceneAdapter:
+    if robot != "astro":
+        raise ValueError(
+            f"Unsupported robot {robot!r}. Supported robots: {', '.join(ROBOT_CHOICES)}"
+        )
+
+    robot_cfg = _load_astro_constants_module().get_astro_robot_cfg()
+    mujoco_scene_cfg = MujocoSceneAdapterCfg(
+        robot_cfg=robot_cfg,
+        output_fps=output_fps,
+        device=device,
+    )
+    mujoco_scene_adapter = MujocoSceneAdapter(mujoco_scene_cfg)
+    return mujoco_scene_adapter
 
 
 class OffscreenFrameRenderer:
@@ -250,7 +304,7 @@ def create_motion_viewer(
             device=device,
         )
     )
-    scene_adapter = scene_adapter_builder(robot, device=device)
+    scene_adapter = scene_adapter_builder(robot, output_fps=fps, device=device)
     return MotionViewer(motions, scene_adapter)
 
 
@@ -302,7 +356,7 @@ def verify_motion_viewer_path(
         )
 
     try:
-        scene_adapter = scene_adapter_builder(robot, device=device)
+        scene_adapter = scene_adapter_builder(robot, output_fps=fps, device=device)
     except Exception as exc:
         raise MotionViewerVerificationError(
             f"Failed to construct {robot} scene adapter: {exc}"
@@ -312,7 +366,9 @@ def verify_motion_viewer_path(
     try:
         viewer.render_current_frame()
     except ValueError as exc:
-        if robot == "astro" and "DOF count" in str(exc):
+        if robot == "astro" and (
+            "DOF count" in str(exc) or "DOFs from robot joint order" in str(exc)
+        ):
             raise MotionViewerVerificationError(
                 f"Incompatible Astro reference motion DOF count: {exc}"
             ) from exc
@@ -382,7 +438,9 @@ def _build_interactive_recording_executor(
 
 def _viewer_handle_configurator(viewer: Any) -> Callable[[Any], None] | None:
     scene_adapter = getattr(viewer, "scene_adapter", None)
-    configure_tracking_camera = getattr(scene_adapter, "configure_tracking_camera", None)
+    configure_tracking_camera = getattr(
+        scene_adapter, "configure_tracking_camera", None
+    )
     if configure_tracking_camera is None:
         return None
 
@@ -441,12 +499,15 @@ def main(
         viewer.record_headless(
             status_reporter=status_reporter,
             recording_attachment_factory=recording_module.RecordingAttachment,
-            recording_output_paths=[target.output_path for target in output_plan.targets],
+            recording_output_paths=[
+                target.output_path for target in output_plan.targets
+            ],
             frame_renderer_factory=lambda: OffscreenFrameRenderer(viewer.scene_adapter),
         )
         return
 
     if run_viewer is None:
+
         def run_viewer(built_viewer: MotionViewer) -> None:
             status_reporter = TerminalStatusReporter()
             if args.record_video:
