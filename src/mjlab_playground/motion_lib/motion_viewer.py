@@ -3,40 +3,141 @@ from __future__ import annotations
 import math
 import shutil
 import sys
-import time
+import warnings
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence, TextIO
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence, TextIO
+
+if TYPE_CHECKING:
+    from mjlab_playground.motion_lib.recording import RecordingRequest, RecordingResult
 
 PLAYBACK_SPEEDS = (0.1, 0.2, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 DEFAULT_PLAYBACK_SPEED_INDEX = PLAYBACK_SPEEDS.index(1.0)
 STATUS_PROGRESS_BAR_WIDTH = 20
-PlaybackAction = str
-KEY_TO_PLAYBACK_ACTION: dict[int, PlaybackAction] = {
-    32: "space",
-    92: "toggle_recording",
-    262: "right",
-    263: "left",
-    264: "down",
-    265: "up",
-}
 
 
-class SceneAdapter(Protocol):
-    """Minimal scene seam used by the source-agnostic reference motion viewer."""
+class PlaybackAction(Enum):
+    """Viewer-independent user intent submitted with one session tick."""
+
+    TOGGLE_PAUSE = "toggle_pause"
+    PREVIOUS_MOTION = "previous_motion"
+    NEXT_MOTION = "next_motion"
+    SLOWER = "slower"
+    FASTER = "faster"
+    RECORD_SELECTED_CLIP = "record_selected_clip"
+    STOP = "stop"
+
+
+class RecordingStatus(Enum):
+    """Presentation-ready state of interactive background recording."""
+
+    DISABLED = "disabled"
+    IDLE = "idle"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class ViewerTick:
+    """One ordered interaction submitted by a concrete viewer adapter."""
+
+    elapsed_seconds: float
+    actions: tuple[PlaybackAction, ...] = ()
+
+
+@dataclass(frozen=True)
+class ViewerSnapshot:
+    """Immutable presentation state returned after one core update."""
+
+    status: str
+    selected_motion_index: int
+    selected_motion_name: str
+    motion_count: int
+    frame_index: int
+    frame_count: int
+    playback_speed: float
+    paused: bool
+    recording_status: RecordingStatus
+    stop_requested: bool
+    recording_output_path: Path | None = None
+    recording_error: str | None = None
+
+
+class MotionScene(Protocol):
+    """Narrow scene seam required by the presentation-agnostic core."""
+
+    def apply_reference_frame(self, motion: Any, frame_index: int) -> None:
+        """Apply one reference frame to the authoritative robot scene."""
+
+
+class ViewerAdapter(Protocol):
+    """Presentation lifecycle driven by the core update function."""
+
+    def run(
+        self,
+        update: Callable[[ViewerTick], ViewerSnapshot],
+    ) -> None:
+        """Run the presentation loop until it stops or an update fails."""
+
+    def close(self) -> None:
+        """Close presentation resources."""
+
+
+class BackgroundRecorder(Protocol):
+    """Minimal recording status seam used during session expansion."""
 
     @property
-    def mj_model(self) -> Any:
-        """MuJoCo model rendered by the passive viewer."""
+    def status(self) -> RecordingStatus:
+        """Return the latest presentation-ready recording status."""
+        ...
+
+    def record_selected_clip(self, motion_index: int, motion: Any) -> None:
+        """Request deterministic recording of the selected reference clip."""
+        ...
+
+    def poll(self) -> None:
+        """Refresh child status without blocking the presentation loop."""
+        ...
+
+    def wait(self) -> None:
+        """Wait for active recording work to finish."""
+        ...
+
+    def cancel(self) -> None:
+        """Cancel active recording work and remove its incomplete output."""
+        ...
+
+    def close(self) -> None:
+        """Release recorder resources after work has finished."""
+        ...
 
     @property
-    def mj_data(self) -> Any:
-        """MuJoCo data rendered by the passive viewer."""
+    def output_path(self) -> Path | None:
+        """Return the captured output target, if any."""
+        ...
 
-    def apply(self, motion: Any, frame_index: int) -> None:
-        """Apply one reference motion frame to the scene."""
+    @property
+    def error(self) -> str | None:
+        """Return recoverable recording failure or rejection context."""
+        ...
 
-    def sync_display_data(self) -> None:
-        """Copy the latest applied scene state into ``mj_data`` for display."""
+
+class DeterministicRecordingOperation(Protocol):
+    """Recording-module interface consumed by the deep viewer."""
+
+    def record(
+        self,
+        motions: Sequence[Any],
+        request: RecordingRequest,
+    ) -> tuple[RecordingResult, ...]:
+        """Record an already-planned request."""
+        ...
+
+
+class ViewerError(RuntimeError):
+    """Fatal reference-motion session failure."""
 
 
 class PlaybackController:
@@ -65,11 +166,15 @@ class PlaybackController:
         self.playback_speed_index = max(self.playback_speed_index - 1, 0)
 
     def select_next_motion(self) -> None:
-        self.selected_motion_index = (self.selected_motion_index + 1) % self.motion_count
+        self.selected_motion_index = (
+            self.selected_motion_index + 1
+        ) % self.motion_count
         self.reset_frame()
 
     def select_previous_motion(self) -> None:
-        self.selected_motion_index = (self.selected_motion_index - 1) % self.motion_count
+        self.selected_motion_index = (
+            self.selected_motion_index - 1
+        ) % self.motion_count
         self.reset_frame()
 
     def reset_frame(self) -> None:
@@ -78,18 +183,6 @@ class PlaybackController:
     def toggle_pause(self) -> None:
         self.paused = not self.paused
 
-    def handle_action(self, action: PlaybackAction) -> None:
-        if action == "left":
-            self.select_previous_motion()
-        elif action == "right":
-            self.select_next_motion()
-        elif action == "up":
-            self.increase_speed()
-        elif action == "down":
-            self.decrease_speed()
-        elif action == "space":
-            self.toggle_pause()
-
     def advance(self, *, frame_count: int, frames: float = 1.0) -> None:
         if frame_count <= 0:
             raise ValueError("frame_count must be positive")
@@ -97,7 +190,9 @@ class PlaybackController:
             return
         if not math.isfinite(frames):
             raise ValueError("frames must be finite")
-        self.frame_position = (self.frame_position + frames * self.playback_speed) % frame_count
+        self.frame_position = (
+            self.frame_position + frames * self.playback_speed
+        ) % frame_count
 
     def current_frame_index(self, *, frame_count: int) -> int:
         if frame_count <= 0:
@@ -108,7 +203,9 @@ class PlaybackController:
 class TerminalStatusReporter:
     """Render playback status as a single updating terminal line."""
 
-    def __init__(self, stream: TextIO | None = None, max_width: int | None = None) -> None:
+    def __init__(
+        self, stream: TextIO | None = None, max_width: int | None = None
+    ) -> None:
         self.stream = stream or sys.stdout
         self.max_width = max_width
         self._last_status: str | None = None
@@ -151,30 +248,245 @@ class MotionViewer:
     def __init__(
         self,
         motions: Sequence[Any],
-        scene_adapter: SceneAdapter,
+        motion_scene: MotionScene,
         *,
-        frame_renderer_factory: Callable[[], Any] | None = None,
+        viewer_adapter: ViewerAdapter | None = None,
+        background_recorder: BackgroundRecorder | None = None,
+        deterministic_recorder: DeterministicRecordingOperation | None = None,
+        status_reporter: Callable[[str], None] | None = None,
     ) -> None:
         if not motions:
             raise ValueError("MotionViewer requires at least one reference motion")
         self.motions = list(motions)
-        self.scene_adapter = scene_adapter
+        self._motion_scene = motion_scene
         self.controller = PlaybackController(motion_count=len(self.motions))
-        self._default_frame_renderer_factory = frame_renderer_factory
+        self._viewer_adapter = viewer_adapter
+        self._background_recorder = background_recorder
+        self._deterministic_recorder = deterministic_recorder
+        self._status_reporter = status_reporter
+        self._stop_requested = False
 
     @property
     def selected_motion(self) -> Any:
         return self.motions[self.controller.selected_motion_index]
 
-    def handle_action(self, action: PlaybackAction) -> None:
-        self.controller.handle_action(action)
+    def run(self) -> None:
+        """Run one presentation-agnostic interactive playback session."""
+        if self._viewer_adapter is None:
+            raise ValueError("viewer_adapter is required for MotionViewer.run()")
 
-    def handle_key(self, key: int) -> None:
-        action = KEY_TO_PLAYBACK_ACTION.get(key)
-        if action is not None:
-            self.handle_action(action)
+        try:
+            try:
+                self._viewer_adapter.run(self._update_session)
+            except KeyboardInterrupt:
+                self._apply_session_action(PlaybackAction.STOP)
+            except ViewerError:
+                raise
+            except Exception as exc:
+                self._stop_requested = True
+                raise ViewerError("reference motion viewer session failed") from exc
+            finally:
+                primary_error = sys.exception()
+                try:
+                    self._viewer_adapter.close()
+                except Exception as exc:
+                    if primary_error is None:
+                        raise ViewerError("failed to close viewer adapter") from exc
+                    warnings.warn(
+                        f"failed to close viewer adapter: {exc}",
+                        stacklevel=2,
+                    )
+        finally:
+            try:
+                self._wait_for_background_recording()
+            finally:
+                self._close_session_resources(primary_error=sys.exception())
 
-    def playback_status(self) -> str:
+    def _wait_for_background_recording(self) -> None:
+        recorder = self._background_recorder
+        if recorder is None or recorder.status is not RecordingStatus.RUNNING:
+            return
+
+        output_path = recorder.output_path
+        context = f": {output_path}" if output_path is not None else ""
+        self._report_shutdown_status(f"Waiting for recording{context}")
+        try:
+            recorder.wait()
+        except KeyboardInterrupt:
+            self._cancel_background_recording(recorder)
+        except Exception as exc:
+            warnings.warn(
+                f"failed to wait for background recording: {exc}",
+                stacklevel=2,
+            )
+            self._cancel_background_recording(recorder)
+        else:
+            if recorder.status is RecordingStatus.RUNNING:
+                self._cancel_background_recording(recorder)
+
+        if recorder.status is RecordingStatus.SUCCEEDED:
+            self._report_shutdown_status(f"Recording succeeded{context}")
+        elif recorder.status is RecordingStatus.FAILED:
+            error_context = f": {recorder.error}" if recorder.error else ""
+            self._report_shutdown_status(f"Recording failed{error_context}")
+
+    @staticmethod
+    def _cancel_background_recording(recorder: BackgroundRecorder) -> None:
+        try:
+            recorder.cancel()
+        except Exception as exc:
+            warnings.warn(
+                f"failed to cancel background recording: {exc}",
+                stacklevel=2,
+            )
+
+    def _report_shutdown_status(self, status: str) -> None:
+        if self._status_reporter is None:
+            return
+        try:
+            self._status_reporter(status)
+        except Exception as exc:
+            warnings.warn(
+                f"failed to report viewer shutdown status: {exc}", stacklevel=2
+            )
+
+    def _close_session_resources(
+        self,
+        *,
+        primary_error: BaseException | None,
+    ) -> None:
+        recorder_close_error: Exception | None = None
+        for resource in (
+            self._background_recorder,
+            self._motion_scene,
+            self._status_reporter,
+        ):
+            close = getattr(resource, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception as exc:
+                    if resource is self._background_recorder:
+                        recorder_close_error = exc
+                    else:
+                        warnings.warn(
+                            f"failed to close viewer session resource: {exc}",
+                            stacklevel=2,
+                        )
+
+        if recorder_close_error is None:
+            return
+        if primary_error is None:
+            raise ViewerError("failed to close background recorder") from (
+                recorder_close_error
+            )
+        warnings.warn(
+            f"failed to close background recorder: {recorder_close_error}",
+            stacklevel=2,
+        )
+
+    def record(self, request: RecordingRequest) -> tuple[RecordingResult, ...]:
+        """Execute one already-planned deterministic recording request."""
+        if self._deterministic_recorder is None:
+            raise ValueError(
+                "deterministic_recorder is required for MotionViewer.record()"
+            )
+        return self._deterministic_recorder.record(self.motions, request)
+
+    def _update_session(self, tick: ViewerTick) -> ViewerSnapshot:
+        elapsed_seconds = float(tick.elapsed_seconds)
+        if elapsed_seconds < 0.0 or not math.isfinite(elapsed_seconds):
+            cause = ValueError("elapsed_seconds must be non-negative and finite")
+            raise ViewerError(
+                f"invalid viewer tick elapsed_seconds: {tick.elapsed_seconds!r}"
+            ) from cause
+
+        for action in tick.actions:
+            self._apply_session_action(action)
+
+        if self._background_recorder is not None:
+            self._background_recorder.poll()
+
+        if not self._stop_requested:
+            self.controller.advance(
+                frame_count=self._frame_count(self.selected_motion),
+                frames=elapsed_seconds * self._motion_fps(self.selected_motion),
+            )
+            frame_count = self._frame_count(self.selected_motion)
+            frame_index = self.controller.current_frame_index(frame_count=frame_count)
+            try:
+                self._motion_scene.apply_reference_frame(
+                    self.selected_motion,
+                    frame_index,
+                )
+            except Exception as exc:
+                self._stop_requested = True
+                motion_number = self.controller.selected_motion_index + 1
+                motion_name = self._motion_name(self.selected_motion)
+                raise ViewerError(
+                    f"failed to apply frame {frame_index} from motion "
+                    f"{motion_number}/{len(self.motions)} ({motion_name})"
+                ) from exc
+
+        return self._session_snapshot()
+
+    def _apply_session_action(self, action: PlaybackAction) -> None:
+        if action is PlaybackAction.TOGGLE_PAUSE:
+            self.controller.toggle_pause()
+        elif action is PlaybackAction.PREVIOUS_MOTION:
+            self.controller.select_previous_motion()
+        elif action is PlaybackAction.NEXT_MOTION:
+            self.controller.select_next_motion()
+        elif action is PlaybackAction.SLOWER:
+            self.controller.decrease_speed()
+        elif action is PlaybackAction.FASTER:
+            self.controller.increase_speed()
+        elif action is PlaybackAction.RECORD_SELECTED_CLIP:
+            if self._background_recorder is not None:
+                motion_index = self.controller.selected_motion_index
+                self._background_recorder.record_selected_clip(
+                    motion_index,
+                    self.motions[motion_index],
+                )
+        elif action is PlaybackAction.STOP:
+            self._stop_requested = True
+
+    def _session_snapshot(self) -> ViewerSnapshot:
+        motion_index = self.controller.selected_motion_index
+        motion = self.selected_motion
+        frame_count = self._frame_count(motion)
+        frame_index = self.controller.current_frame_index(frame_count=frame_count)
+        recording_status = RecordingStatus.DISABLED
+        recording_output_path = None
+        recording_error = None
+        if self._background_recorder is not None:
+            recording_status = self._background_recorder.status
+            recording_output_path = self._background_recorder.output_path
+            recording_error = self._background_recorder.error
+        status = self._playback_status()
+        if recording_status not in (RecordingStatus.DISABLED, RecordingStatus.IDLE):
+            recording_context = recording_status.value
+            if recording_output_path is not None:
+                recording_context = f"{recording_context}: {recording_output_path}"
+            if recording_error is not None:
+                recording_context = f"{recording_context} ({recording_error})"
+            status = f"{status} | recording {recording_context}"
+        return ViewerSnapshot(
+            status=status,
+            selected_motion_index=motion_index,
+            selected_motion_name=self._motion_name(motion),
+            motion_count=len(self.motions),
+            frame_index=frame_index,
+            frame_count=frame_count,
+            playback_speed=self.controller.playback_speed,
+            paused=self.controller.paused,
+            recording_status=recording_status,
+            stop_requested=self._stop_requested,
+            recording_output_path=recording_output_path,
+            recording_error=recording_error,
+        )
+
+    def _playback_status(self) -> str:
         motion_index = self.controller.selected_motion_index
         motion = self.selected_motion
         frame_count = self._frame_count(motion)
@@ -189,304 +501,6 @@ class MotionViewer:
             f"| speed {self.controller.playback_speed:g}x "
             f"| {state}"
         )
-
-    def render_current_frame(self) -> None:
-        motion = self.selected_motion
-        frame_index = self.controller.current_frame_index(
-            frame_count=self._frame_count(motion),
-        )
-        self.scene_adapter.apply(motion, frame_index)
-
-    def advance(self, *, frames: float = 1.0) -> None:
-        self.controller.advance(
-            frame_count=self._frame_count(self.selected_motion),
-            frames=frames,
-        )
-
-    def record_headless(
-        self,
-        *,
-        recording_output_paths: Sequence[Path],
-        recording_attachment_factory: Callable[[], Any] | None = None,
-        frame_renderer_factory: Callable[[], Any] | None = None,
-        status_reporter: Callable[[str], None] | None = None,
-    ) -> list[Any]:
-        """Record every loaded reference motion once without a passive viewer."""
-        if len(recording_output_paths) != len(self.motions):
-            raise ValueError("recording_output_paths must match the loaded motion count")
-        if recording_attachment_factory is None:
-            raise ValueError("recording_attachment_factory is required for recording")
-        frame_renderer_factory = self._resolve_frame_renderer_factory(
-            frame_renderer_factory,
-        )
-
-        def report(message: str) -> None:
-            if status_reporter is not None:
-                status_reporter(message)
-            else:
-                print(message, file=sys.stderr, flush=True)
-
-        renderer = frame_renderer_factory()
-        results: list[Any] = []
-        try:
-            for motion_index, (motion, output_path) in enumerate(
-                zip(self.motions, recording_output_paths, strict=True)
-            ):
-                motion_name = self._motion_name(motion)
-                frame_count = self._frame_count(motion)
-                fps = self._motion_fps(motion)
-                attachment = recording_attachment_factory()
-                report(
-                    f"Recording {motion_index + 1}/{len(self.motions)}: "
-                    f"{motion_name} -> {output_path}"
-                )
-                attachment.start(output_path, fps=fps)
-                for frame_index in range(frame_count):
-                    self.scene_adapter.apply(motion, frame_index)
-                    attachment.capture(renderer.render_frame())
-                    report(f"Recording {motion_name}: frame {frame_index + 1}/{frame_count}")
-                result = attachment.stop()
-                results.append(result)
-                if getattr(result, "written", False):
-                    report(f"Saved recording: {result.output_path}")
-                else:
-                    reason = getattr(result, "reason", "no frames captured")
-                    report(f"Skipped recording: {reason}")
-        finally:
-            close_frame_renderer = getattr(renderer, "close", None)
-            if close_frame_renderer is not None:
-                close_frame_renderer()
-
-        return results
-
-    def record_single_headless(
-        self,
-        *,
-        motion_index: int,
-        output_path: Path,
-        recording_attachment: Any | None = None,
-        frame_renderer_factory: Callable[[], Any] | None = None,
-        status_reporter: Callable[[str], None] | None = None,
-    ) -> Any:
-        """Record one reference motion after interactive viewing has stopped."""
-        if motion_index < 0 or motion_index >= len(self.motions):
-            raise IndexError(f"motion_index out of range: {motion_index}")
-        if recording_attachment is None:
-            raise ValueError("recording_attachment is required for recording")
-        frame_renderer_factory = self._resolve_frame_renderer_factory(
-            frame_renderer_factory,
-        )
-
-        def report(message: str) -> None:
-            if status_reporter is not None:
-                status_reporter(message)
-            else:
-                print(message, file=sys.stderr, flush=True)
-
-        motion = self.motions[motion_index]
-        motion_name = self._motion_name(motion)
-        frame_count = self._frame_count(motion)
-        renderer = frame_renderer_factory()
-
-        def attachment_is_recording() -> bool:
-            return bool(getattr(recording_attachment, "is_recording", True))
-
-        try:
-            recording_attachment.start(output_path, fps=self._motion_fps(motion))
-            for frame_index in range(frame_count):
-                self.scene_adapter.apply(motion, frame_index)
-                frame = renderer.render_frame()
-                if not attachment_is_recording():
-                    report("Skipped recording: recorder stopped before capture")
-                    return None
-                recording_attachment.capture(frame)
-                report(f"Recording {motion_name}: frame {frame_index + 1}/{frame_count}")
-            if not attachment_is_recording():
-                report("Skipped recording: recorder stopped before save")
-                return None
-            result = recording_attachment.stop()
-            if getattr(result, "written", False):
-                report(f"Saved recording: {result.output_path}")
-            else:
-                reason = getattr(result, "reason", "no frames captured")
-                report(f"Skipped recording: {reason}")
-            return result
-        finally:
-            close_frame_renderer = getattr(renderer, "close", None)
-            if close_frame_renderer is not None:
-                close_frame_renderer()
-
-    def run_interactive(
-        self,
-        *,
-        launch_passive: Callable[..., Any] | None = None,
-        status_reporter: Callable[[str], None] | None = None,
-        clock: Callable[[], float] = time.perf_counter,
-        sleep: Callable[[float], None] = time.sleep,
-        target_refresh_rate: float = 60.0,
-        recording_attachment: Any | None = None,
-        recording_output_paths: Sequence[Path] | None = None,
-        frame_renderer_factory: Callable[[], Any] | None = None,
-        recording_executor: Callable[[int, Path], Any] | None = None,
-        viewer_handle_configurator: Callable[[Any], None] | None = None,
-        viewer_handle_status_provider: Callable[[Any], str] | None = None,
-    ) -> None:
-        if launch_passive is None:
-            import mujoco.viewer
-
-            launch_passive = mujoco.viewer.launch_passive
-        recording_enabled = (
-            recording_attachment is not None
-            or recording_output_paths is not None
-            or recording_executor is not None
-        )
-        if recording_enabled:
-            if recording_output_paths is None:
-                raise ValueError("recording_output_paths are required when recording is enabled")
-            if len(recording_output_paths) != len(self.motions):
-                raise ValueError("recording_output_paths must match the loaded motion count")
-            if recording_executor is None:
-                if recording_attachment is None:
-                    raise ValueError(
-                        "recording_executor or recording_attachment is required "
-                        "for recording"
-                    )
-                frame_renderer_factory = self._resolve_frame_renderer_factory(
-                    frame_renderer_factory,
-                )
-
-        recording_motion_index: int | None = None
-        pending_recording: tuple[int, Path] | None = None
-
-        def report_recording_status(message: str) -> None:
-            if status_reporter is not None:
-                status_reporter(message)
-            else:
-                print(message, file=sys.stderr, flush=True)
-
-        def execute_recording(motion_index: int, output_path: Path) -> Any:
-            if recording_executor is not None:
-                return recording_executor(motion_index, output_path)
-            assert recording_attachment is not None
-            assert frame_renderer_factory is not None
-            return self.record_single_headless(
-                motion_index=motion_index,
-                output_path=output_path,
-                recording_attachment=recording_attachment,
-                frame_renderer_factory=frame_renderer_factory,
-                status_reporter=status_reporter,
-            )
-
-        def stop_recording() -> None:
-            nonlocal pending_recording, recording_motion_index
-            if not recording_enabled or recording_motion_index is None:
-                return
-            assert recording_output_paths is not None
-            output_path = recording_output_paths[recording_motion_index]
-            pending_recording = (recording_motion_index, output_path)
-            recording_motion_index = None
-            report_recording_status(
-                f"Recording queued: {output_path}. "
-                "Pausing viewer render while video is recorded."
-            )
-
-        def toggle_recording() -> None:
-            nonlocal recording_motion_index
-            if not recording_enabled or recording_output_paths is None:
-                return
-            if recording_motion_index is not None:
-                stop_recording()
-                return
-
-            recording_motion_index = self.controller.selected_motion_index
-            output_path = recording_output_paths[recording_motion_index]
-            report_recording_status(f"Recording: {output_path}")
-
-        def key_callback(key: int) -> None:
-            action = KEY_TO_PLAYBACK_ACTION.get(key)
-            if action == "toggle_recording":
-                toggle_recording()
-                return
-            if recording_motion_index is not None and action in {"left", "right"}:
-                report_recording_status(
-                    "Recording active; stop recording before switching motions."
-                )
-                return
-            self.handle_key(key)
-
-        passive_key_callback = key_callback if recording_enabled else self.handle_key
-
-        handle = launch_passive(
-            self.scene_adapter.mj_model,
-            self.scene_adapter.mj_data,
-            key_callback=passive_key_callback,
-            show_left_ui=False,
-            show_right_ui=False,
-        )
-        if handle is None:
-            raise RuntimeError("Failed to launch MuJoCo viewer")
-        if viewer_handle_configurator is not None:
-            viewer_handle_configurator(handle)
-
-        previous_time = clock()
-        min_frame_time = 1.0 / target_refresh_rate if target_refresh_rate > 0.0 else 0.0
-        try:
-            try:
-                while handle.is_running():
-                    self.render_current_frame()
-                    self.scene_adapter.sync_display_data()
-                    if status_reporter is not None:
-                        status = self.playback_status()
-                        if viewer_handle_status_provider is not None:
-                            status_suffix = viewer_handle_status_provider(handle)
-                            if status_suffix:
-                                status = f"{status} | {status_suffix}"
-                        status_reporter(status)
-                    handle.sync()
-                    if pending_recording is not None:
-                        motion_index, output_path = pending_recording
-                        pending_recording = None
-                        execute_recording(motion_index, output_path)
-                        previous_time = clock()
-                        continue
-
-                    current_time = clock()
-                    elapsed_seconds = max(0.0, current_time - previous_time)
-                    previous_time = current_time
-                    self.advance(frames=elapsed_seconds * self._motion_fps(self.selected_motion))
-
-                    sleep_for = min_frame_time - elapsed_seconds
-                    if sleep_for > 0.0:
-                        sleep(sleep_for)
-            finally:
-                if recording_motion_index is not None and pending_recording is None:
-                    assert recording_output_paths is not None
-                    pending_recording = (
-                        recording_motion_index,
-                        recording_output_paths[recording_motion_index],
-                    )
-                    recording_motion_index = None
-                try:
-                    if pending_recording is not None:
-                        motion_index, output_path = pending_recording
-                        pending_recording = None
-                        execute_recording(motion_index, output_path)
-                finally:
-                    handle.close()
-        finally:
-            close_status_reporter = getattr(status_reporter, "close", None)
-            if close_status_reporter is not None:
-                close_status_reporter()
-
-    def _resolve_frame_renderer_factory(
-        self,
-        frame_renderer_factory: Callable[[], Any] | None,
-    ) -> Callable[[], Any]:
-        if frame_renderer_factory is not None:
-            return frame_renderer_factory
-        if self._default_frame_renderer_factory is not None:
-            return self._default_frame_renderer_factory
-        raise ValueError("frame_renderer_factory is required for recording")
 
     @staticmethod
     def _frame_count(motion: Any) -> int:
@@ -521,13 +535,3 @@ class MotionViewer:
         if fps <= 0.0 or not math.isfinite(fps):
             raise ValueError("reference motion fps must be positive and finite")
         return fps
-
-
-def verify_reference_motion_viewer_path(
-    motions: Sequence[Any],
-    scene_adapter: SceneAdapter,
-) -> MotionViewer:
-    """Construct a source-agnostic viewer and apply one reference frame."""
-    viewer = MotionViewer(motions, scene_adapter)
-    viewer.render_current_frame()
-    return viewer

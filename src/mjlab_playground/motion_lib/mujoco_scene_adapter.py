@@ -96,8 +96,12 @@ class MujocoSceneAdapter:
     def mj_data(self) -> Any:
         return self.sim.mj_data
 
-    def apply(self, motion: ReferenceMotion, frame_index: int) -> None:
-        """Apply one frame from a reference motion for viewer playback."""
+    def apply_reference_frame(
+        self,
+        motion: ReferenceMotion,
+        frame_index: int,
+    ) -> None:
+        """Apply one frame through the presentation-agnostic scene seam."""
         self.apply_frame(motion.frame(frame_index))
 
     def apply_frame(self, frame: ReferenceFrame) -> None:
@@ -202,8 +206,7 @@ class MujocoSceneAdapter:
             )
         if int(tensor.shape[-1]) != width:
             raise ValueError(
-                f"{field_name} must have last dimension {width}, "
-                f"got {tensor.shape[-1]}"
+                f"{field_name} must have last dimension {width}, got {tensor.shape[-1]}"
             )
         if self.body_names and int(tensor.shape[1]) != len(self.body_names):
             raise ValueError(
@@ -253,8 +256,7 @@ class MujocoSceneAdapter:
             )
         if width is not None and int(tensor.shape[-1]) != width:
             raise ValueError(
-                f"{field_name} must have last dimension {width}, "
-                f"got {tensor.shape[-1]}"
+                f"{field_name} must have last dimension {width}, got {tensor.shape[-1]}"
             )
         return tensor[0].clone()
 

@@ -16,7 +16,9 @@ def _identity_root_rot(num_frames: int) -> torch.Tensor:
     return torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(num_frames, 1)
 
 
-def _source_motion(*, dof_count: int = 2, with_velocities: bool = True) -> ReferenceMotion:
+def _source_motion(
+    *, dof_count: int = 2, with_velocities: bool = True
+) -> ReferenceMotion:
     fields = {
         "name": "walk_001",
         "display_name": "Walk 001",
@@ -241,7 +243,9 @@ class FakeSimulation:
             mocap_quat=torch.zeros(1, 4).numpy(),
             xfrc_applied=torch.zeros(1, 6).numpy(),
         )
-        self.mj_model = SimpleNamespace(opt=SimpleNamespace(timestep=cfg.mujoco.timestep))
+        self.mj_model = SimpleNamespace(
+            opt=SimpleNamespace(timestep=cfg.mujoco.timestep)
+        )
         self.forward_calls = 0
 
     def forward(self) -> None:
@@ -275,11 +279,15 @@ class FakeWarpBridgeLikeData:
 
     @property
     def mocap_pos(self):
-        raise TypeError("Cannot convert <class 'warp._src.types.vec3f'> to a Torch type")
+        raise TypeError(
+            "Cannot convert <class 'warp._src.types.vec3f'> to a Torch type"
+        )
 
     @property
     def mocap_quat(self):
-        raise TypeError("Cannot convert <class 'warp._src.types.quatf'> to a Torch type")
+        raise TypeError(
+            "Cannot convert <class 'warp._src.types.quatf'> to a Torch type"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -367,6 +375,16 @@ def test_adapter_constructs_one_env_scene_and_sets_mujoco_timestep() -> None:
     )
 
 
+def test_adapter_applies_reference_frame_through_core_scene_capability() -> None:
+    adapter = _adapter()
+    motion = _source_motion()
+
+    adapter.apply_reference_frame(motion, 1)
+
+    assert len(adapter.robot.root_states) == 1
+    assert torch.equal(adapter.robot.joint_positions[0][0, :2], motion.dof_pos[1])
+
+
 def test_apply_frame_writes_default_backed_state_and_updates_scene() -> None:
     adapter = _adapter()
     frame = ReferenceFrame(
@@ -383,10 +401,16 @@ def test_apply_frame_writes_default_backed_state_and_updates_scene() -> None:
     robot = adapter.robot
     torch.testing.assert_close(
         robot.root_states[0],
-        torch.tensor([[101.0, 202.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.1, 0.2, 0.3, 1.1, 1.2, 1.3]]),
+        torch.tensor(
+            [[101.0, 202.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.1, 0.2, 0.3, 1.1, 1.2, 1.3]]
+        ),
     )
-    torch.testing.assert_close(robot.joint_positions[0], torch.tensor([[0.4, 0.5, 7.0]]))
-    torch.testing.assert_close(robot.joint_velocities[0], torch.tensor([[2.1, 2.2, 0.7]]))
+    torch.testing.assert_close(
+        robot.joint_positions[0], torch.tensor([[0.4, 0.5, 7.0]])
+    )
+    torch.testing.assert_close(
+        robot.joint_velocities[0], torch.tensor([[2.1, 2.2, 0.7]])
+    )
     assert robot.joint_ids_seen[0] is None
     assert adapter.sim.forward_calls == 1
     assert adapter.scene.update_dts == [0.02]
@@ -404,7 +428,9 @@ def test_apply_frame_uses_default_velocities_when_optional_fields_are_missing() 
 
     torch.testing.assert_close(
         adapter.robot.root_states[0],
-        torch.tensor([[101.0, 202.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.7, 0.8, 0.9, 1.7, 1.8, 1.9]]),
+        torch.tensor(
+            [[101.0, 202.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.7, 0.8, 0.9, 1.7, 1.8, 1.9]]
+        ),
     )
     torch.testing.assert_close(
         adapter.robot.joint_velocities[0],
@@ -420,16 +446,20 @@ def test_apply_frame_rejects_dof_count_mismatch() -> None:
         dof_pos=torch.tensor([0.4]),
     )
 
-    with pytest.raises(ValueError, match="expected 2 DOFs from robot joint order, got 1"):
+    with pytest.raises(
+        ValueError, match="expected 2 DOFs from robot joint order, got 1"
+    ):
         adapter.apply_frame(frame)
 
 
 def test_apply_uses_reference_motion_frame() -> None:
     adapter = _adapter()
 
-    adapter.apply(_source_motion(), 1)
+    adapter.apply_reference_frame(_source_motion(), 1)
 
-    torch.testing.assert_close(adapter.robot.joint_positions[0], torch.tensor([[0.3, 0.4, 7.0]]))
+    torch.testing.assert_close(
+        adapter.robot.joint_positions[0], torch.tensor([[0.3, 0.4, 7.0]])
+    )
 
 
 def test_mujoco_scene_adapter_does_not_own_motion_enrichment() -> None:
@@ -460,9 +490,7 @@ def test_read_robot_state_reads_full_robot_state_after_frame_application() -> No
     assert frame.body_ang_vel.shape == (3, 3)
     torch.testing.assert_close(
         frame.body_pos,
-        torch.tensor(
-            [[10.0, 10.1, 10.2], [11.0, 11.1, 11.2], [12.0, 12.1, 12.2]]
-        ),
+        torch.tensor([[10.0, 10.1, 10.2], [11.0, 11.1, 11.2], [12.0, 12.1, 12.2]]),
     )
     assert adapter.sim.forward_calls == 1
     assert adapter.scene.update_dts == [0.02]

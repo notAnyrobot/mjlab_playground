@@ -2,39 +2,31 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import subprocess
+import os
 import sys
 import types
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from mjlab_playground.motion_lib.motion_viewer import (
-    PLAYBACK_SPEEDS,
-    PlaybackController,
-    SceneAdapter,
+    MotionViewer,
     TerminalStatusReporter,
-)
-from mjlab_playground.motion_lib.motion_viewer import (
-    MotionViewer as BaseMotionViewer,
 )
 from mjlab_playground.motion_lib.mujoco_scene_adapter import (
     MujocoSceneAdapter,
     MujocoSceneAdapterCfg,
 )
+from mjlab_playground.motion_lib.viewers import (
+    VIEWER_MODE_CHOICES,
+    create_viewer_adapter,
+    resolve_viewer_mode,
+)
 
 __all__ = [
-    "DEFAULT_CAMERA_CONFIG",
-    "ViewerCameraConfig",
     "MotionViewer",
     "MotionViewerVerificationError",
-    "OffscreenFrameRenderer",
-    "PLAYBACK_SPEEDS",
-    "PlaybackController",
-    "SceneAdapter",
     "TerminalStatusReporter",
     "build_scene_adapter",
-    "create_motion_viewer",
     "main",
     "parse_args",
     "verify_motion_viewer_path",
@@ -42,16 +34,6 @@ __all__ = [
 
 MOTION_FORMAT_CHOICES = ("pyroki", "proto", "mjlab")
 ROBOT_CHOICES = ("astro",)
-
-
-@dataclass(frozen=True)
-class ViewerCameraConfig:
-    distance: float = 2.0
-    elevation: float = -5.0
-    azimuth: float = 20.0
-
-
-DEFAULT_CAMERA_CONFIG = ViewerCameraConfig()
 
 
 class MotionViewerVerificationError(RuntimeError):
@@ -138,7 +120,7 @@ def build_scene_adapter(
     *,
     output_fps: float,
     device: str = "cpu",
-) -> SceneAdapter:
+) -> MujocoSceneAdapter:
     if robot != "astro":
         raise ValueError(
             f"Unsupported robot {robot!r}. Supported robots: {', '.join(ROBOT_CHOICES)}"
@@ -154,63 +136,10 @@ def build_scene_adapter(
     return mujoco_scene_adapter
 
 
-class OffscreenFrameRenderer:
-    """Lazy frame-renderer adapter for interactive recording."""
-
-    def __init__(
-        self,
-        scene_adapter: SceneAdapter,
-        *,
-        offscreen_renderer_cls: Any | None = None,
-        viewer_config_cls: Any | None = None,
-    ) -> None:
-        if offscreen_renderer_cls is None or viewer_config_cls is None:
-            from mjlab.viewer import ViewerConfig
-            from mjlab.viewer.offscreen_renderer import OffscreenRenderer
-
-            offscreen_renderer_cls = OffscreenRenderer
-            viewer_config_cls = ViewerConfig
-
-        cfg = viewer_config_cls(
-            height=480,
-            width=640,
-            origin_type=viewer_config_cls.OriginType.ASSET_ROOT,
-            entity_name="robot",
-            distance=DEFAULT_CAMERA_CONFIG.distance,
-            elevation=DEFAULT_CAMERA_CONFIG.elevation,
-            azimuth=DEFAULT_CAMERA_CONFIG.azimuth,
-        )
-        sim = scene_adapter.sim  # type: ignore[attr-defined]
-        self._renderer = offscreen_renderer_cls(
-            model=scene_adapter.mj_model,
-            cfg=cfg,
-            scene=scene_adapter.scene,  # type: ignore[attr-defined]
-            sim_model=getattr(sim, "model", None),
-        )
-        self._sim_data = sim.data
-        self._renderer.initialize()
-
-    def render_frame(self) -> Any:
-        self._renderer.update(self._sim_data)
-        return self._renderer.render()
-
-    def close(self) -> None:
-        self._renderer.close()
-
-
-class MotionViewer(BaseMotionViewer):
-    """Launch-runner viewer with concrete renderer defaults."""
-
-    def __init__(self, motions: Sequence[Any], scene_adapter: SceneAdapter) -> None:
-        super().__init__(
-            motions,
-            scene_adapter,
-            frame_renderer_factory=lambda: OffscreenFrameRenderer(scene_adapter),
-        )
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="View reference motions in MuJoCo.")
+    parser = argparse.ArgumentParser(
+        description="View reference motions with native MuJoCo or browser-based Viser."
+    )
     parser.add_argument(
         "--motion-files",
         required=True,
@@ -233,18 +162,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cpu", help="Device used for scene state.")
     parser.add_argument(
+        "--viewer",
+        choices=VIEWER_MODE_CHOICES,
+        default="auto",
+        help=(
+            "Interactive presentation: auto selects Viser on macOS and Linux "
+            "without a display, or native MuJoCo on Linux with a display."
+        ),
+    )
+    parser.add_argument(
         "--record-video",
         action="store_true",
         help=(
-            "Enable '\\' recording selection. Stopping an interactive recording "
-            "pauses viewer rendering, records the selected MP4 headlessly, "
-            "then resumes the same viewer."
+            "Enable one-shot '\\' recording of the selected full clip in a "
+            "background child process while interactive playback continues."
         ),
     )
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="Record all loaded motions and exit without launching a passive viewer.",
+        help=(
+            "Record every loaded clip deterministically and exit without launching "
+            "an interactive viewer. Requires --record-video."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -266,6 +206,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.headless and not args.record_video:
         parser.error("--headless requires --record-video in v1")
+    if args.output_dir is not None and not args.record_video:
+        parser.error("--output-dir requires --record-video")
+    if args.smoke_test and args.record_video:
+        parser.error("--smoke-test cannot be combined with --record-video")
+    if (args.headless or args.smoke_test) and args.viewer != "auto":
+        parser.error(
+            "explicit --viewer selection requires interactive presentation; "
+            "use --viewer auto with --headless or --smoke-test"
+        )
     return args
 
 
@@ -286,28 +235,6 @@ def _load_reference_motions(
     )
 
 
-def create_motion_viewer(
-    motion_files: str | Path,
-    *,
-    motion_format: str = "pyroki",
-    fps: float = 30.0,
-    robot: str = "astro",
-    device: str = "cpu",
-    load_motions: Callable[..., Sequence[Any]] = _load_reference_motions,
-    scene_adapter_builder: Callable[..., SceneAdapter] = build_scene_adapter,
-) -> MotionViewer:
-    motions = list(
-        load_motions(
-            motion_files,
-            motion_format=motion_format,
-            fps=fps,
-            device=device,
-        )
-    )
-    scene_adapter = scene_adapter_builder(robot, output_fps=fps, device=device)
-    return MotionViewer(motions, scene_adapter)
-
-
 def verify_motion_viewer_path(
     motion_files: str | Path,
     *,
@@ -316,8 +243,8 @@ def verify_motion_viewer_path(
     robot: str = "astro",
     device: str = "cpu",
     load_motions: Callable[..., Sequence[Any]] = _load_reference_motions,
-    scene_adapter_builder: Callable[..., SceneAdapter] = build_scene_adapter,
-) -> MotionViewer:
+    scene_adapter_builder: Callable[..., Any] = build_scene_adapter,
+) -> None:
     """Load, construct, apply one frame, and return without launching a viewer."""
     if motion_format not in MOTION_FORMAT_CHOICES:
         raise MotionViewerVerificationError(
@@ -362,9 +289,8 @@ def verify_motion_viewer_path(
             f"Failed to construct {robot} scene adapter: {exc}"
         ) from exc
 
-    viewer = MotionViewer(motions, scene_adapter)
     try:
-        viewer.render_current_frame()
+        scene_adapter.apply_reference_frame(motions[0], 0)
     except ValueError as exc:
         if robot == "astro" and (
             "DOF count" in str(exc) or "DOFs from robot joint order" in str(exc)
@@ -380,8 +306,6 @@ def verify_motion_viewer_path(
             f"Failed to apply one reference motion frame to {robot} scene: {exc}"
         ) from exc
 
-    return viewer
-
 
 def _recording_motion_names(motions: Sequence[Any]) -> list[str]:
     names = []
@@ -395,80 +319,35 @@ def _recording_motion_names(motions: Sequence[Any]) -> list[str]:
     return names
 
 
-def _build_interactive_recording_executor(
-    *,
-    targets: Sequence[Any],
-    motion_format: str,
-    fps: float,
-    robot: str,
-    device: str,
-) -> Callable[[int, Path], None]:
-    """Run selected interactive recordings in a child process to isolate GL contexts."""
-
-    def recording_executor(motion_index: int, output_path: Path) -> None:
-        target = targets[motion_index]
-        command = [
-            sys.executable,
-            "-m",
-            "mjlab_playground.motion_lib.scripts.launch_motion_viewer",
-            "--motion-files",
-            str(target.source_path),
-            "--format",
-            motion_format,
-            "--fps",
-            str(float(fps)),
-            "--robot",
-            robot,
-            "--device",
-            device,
-            "--headless",
-            "--record-video",
-            "--output-dir",
-            str(Path(output_path).parent),
-        ]
-        result = subprocess.run(command, check=False)
-        if result.returncode != 0:
-            raise RuntimeError(
-                "interactive recording subprocess failed with exit code "
-                f"{result.returncode}: {' '.join(command)}"
-            )
-
-    return recording_executor
+def _display_is_available() -> bool:
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-def _viewer_handle_configurator(viewer: Any) -> Callable[[Any], None] | None:
-    scene_adapter = getattr(viewer, "scene_adapter", None)
-    configure_tracking_camera = getattr(
-        scene_adapter, "configure_tracking_camera", None
-    )
-    if configure_tracking_camera is None:
-        return None
-
-    def configure(viewer_handle: Any) -> None:
-        configure_tracking_camera(viewer_handle, DEFAULT_CAMERA_CONFIG)
-
-    return configure
+def _report_viewer_selection(mode: str) -> None:
+    print(f"Selected viewer: {mode}", flush=True)
 
 
-def _format_camera_value(value: Any) -> str:
-    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+def _create_deterministic_recorder(scene: Any, **kwargs: Any) -> Any:
+    return _load_recording_module().create_mjlab_deterministic_recorder(scene, **kwargs)
 
 
-def _viewer_handle_camera_status(viewer_handle: Any) -> str:
-    cam = viewer_handle.cam
-    return (
-        f"camera distance={_format_camera_value(cam.distance)} "
-        f"elevation={_format_camera_value(cam.elevation)} "
-        f"azimuth={_format_camera_value(cam.azimuth)}"
-    )
+def _create_background_recorder(**kwargs: Any) -> Any:
+    return _load_recording_module().create_subprocess_background_recorder(**kwargs)
 
 
 def main(
     argv: Sequence[str] | None = None,
     *,
-    create_viewer: Callable[..., MotionViewer] = create_motion_viewer,
-    run_viewer: Callable[[MotionViewer], None] | None = None,
-    verify_viewer_path: Callable[..., MotionViewer] = verify_motion_viewer_path,
+    load_motions: Callable[..., Sequence[Any]] = _load_reference_motions,
+    scene_adapter_builder: Callable[..., Any] = build_scene_adapter,
+    motion_viewer_factory: Callable[..., MotionViewer] = MotionViewer,
+    verify_viewer_path: Callable[..., None] = verify_motion_viewer_path,
+    viewer_adapter_factory: Callable[..., Any] = create_viewer_adapter,
+    deterministic_recorder_factory: Callable[..., Any] = _create_deterministic_recorder,
+    background_recorder_factory: Callable[..., Any] = _create_background_recorder,
+    platform_name: str | None = None,
+    display_available: bool | None = None,
+    report_viewer_selection: Callable[[str], None] = _report_viewer_selection,
 ) -> None:
     args = parse_args(argv)
     if args.smoke_test:
@@ -481,75 +360,82 @@ def main(
         )
         return
 
-    viewer = create_viewer(
-        args.motion_files,
-        motion_format=args.motion_format,
-        fps=args.fps,
-        robot=args.robot,
-        device=args.device,
+    resolved_viewer_mode: str | None = None
+    if not args.headless:
+        resolved_viewer_mode = resolve_viewer_mode(
+            args.viewer,
+            platform_name=sys.platform if platform_name is None else platform_name,
+            display_available=(
+                _display_is_available()
+                if display_available is None
+                else display_available
+            ),
+        )
+        report_viewer_selection(resolved_viewer_mode)
+
+    motions = list(
+        load_motions(
+            args.motion_files,
+            motion_format=args.motion_format,
+            fps=args.fps,
+            device=args.device,
+        )
     )
+    scene = scene_adapter_builder(args.robot, output_fps=args.fps, device=args.device)
+
     if args.headless:
         status_reporter = TerminalStatusReporter()
         recording_module = _load_recording_module()
         output_plan = recording_module.plan_recording_outputs(
             args.motion_files,
             output_dir=args.output_dir,
-            motion_names=_recording_motion_names(viewer.motions),
+            motion_names=_recording_motion_names(motions),
         )
-        viewer.record_headless(
+        deterministic_recorder = deterministic_recorder_factory(
+            scene,
             status_reporter=status_reporter,
-            recording_attachment_factory=recording_module.RecordingAttachment,
-            recording_output_paths=[
-                target.output_path for target in output_plan.targets
-            ],
-            frame_renderer_factory=lambda: OffscreenFrameRenderer(viewer.scene_adapter),
         )
+        motion_viewer_factory(
+            motions,
+            scene,
+            deterministic_recorder=deterministic_recorder,
+        ).record(output_plan.as_request())
         return
 
-    if run_viewer is None:
+    status_reporter = TerminalStatusReporter()
+    adapter_options: dict[str, Any] = {
+        "status_reporter": status_reporter,
+        "recording_enabled": args.record_video,
+    }
+    background_recorder = None
+    if args.record_video:
+        recording_module = _load_recording_module()
+        output_plan = recording_module.plan_recording_outputs(
+            args.motion_files,
+            output_dir=args.output_dir,
+            motion_names=_recording_motion_names(motions),
+        )
+        background_recorder = background_recorder_factory(
+            targets=output_plan.as_request().targets,
+            motion_format=args.motion_format,
+            fps=args.fps,
+            robot=args.robot,
+            device=args.device,
+        )
 
-        def run_viewer(built_viewer: MotionViewer) -> None:
-            status_reporter = TerminalStatusReporter()
-            if args.record_video:
-                recording_module = _load_recording_module()
-                output_plan = recording_module.plan_recording_outputs(
-                    args.motion_files,
-                    output_dir=args.output_dir,
-                    motion_names=_recording_motion_names(built_viewer.motions),
-                )
-                built_viewer.run_interactive(
-                    status_reporter=status_reporter,
-                    recording_output_paths=[
-                        target.output_path for target in output_plan.targets
-                    ],
-                    recording_executor=_build_interactive_recording_executor(
-                        targets=output_plan.targets,
-                        motion_format=args.motion_format,
-                        fps=args.fps,
-                        robot=args.robot,
-                        device=args.device,
-                    ),
-                    viewer_handle_configurator=_viewer_handle_configurator(
-                        built_viewer
-                    ),
-                    viewer_handle_status_provider=_viewer_handle_camera_status,
-                )
-                return
-
-            viewer_handle_configurator = _viewer_handle_configurator(built_viewer)
-            if viewer_handle_configurator is None:
-                built_viewer.run_interactive(
-                    status_reporter=status_reporter,
-                    viewer_handle_status_provider=_viewer_handle_camera_status,
-                )
-            else:
-                built_viewer.run_interactive(
-                    status_reporter=status_reporter,
-                    viewer_handle_configurator=viewer_handle_configurator,
-                    viewer_handle_status_provider=_viewer_handle_camera_status,
-                )
-
-    run_viewer(viewer)
+    assert resolved_viewer_mode is not None
+    viewer_adapter = viewer_adapter_factory(
+        resolved_viewer_mode,
+        scene=scene,
+        **adapter_options,
+    )
+    motion_viewer_factory(
+        motions,
+        scene,
+        viewer_adapter=viewer_adapter,
+        background_recorder=background_recorder,
+        status_reporter=status_reporter,
+    ).run()
 
 
 if __name__ == "__main__":
