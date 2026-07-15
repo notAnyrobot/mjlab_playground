@@ -123,17 +123,16 @@ class MotionLib:
 
     def resample(
         self,
-        motions: list[ReferenceMotionState],
-    ) -> list[ReferenceMotionState]:
-        """Resample source clips to ``cfg.output_fps`` without simulator enrichment."""
-        resampled = []
-        for motion in motions:
-            try:
-                resampled.append(self._resampler.resample(motion))
-            except Exception as exc:
-                identifier = self._motion_identifier(motion)
-                raise type(exc)(f"{identifier}: {exc}") from exc
-        return resampled
+        motion: ReferenceMotionState,
+    ) -> ReferenceMotionState:
+        """Resample one source clip without simulator enrichment."""
+        if not isinstance(motion, ReferenceMotionState):
+            raise TypeError("MotionLib.resample expects one ReferenceMotionState")
+        try:
+            return self._resampler.resample(motion)
+        except Exception as exc:
+            identifier = self._motion_identifier(motion)
+            raise type(exc)(f"{identifier}: {exc}") from exc
 
     def query(
         self,
@@ -351,26 +350,20 @@ class MotionLib:
 
     def enrich(
         self,
-        motions: list[ReferenceMotionState],
-    ) -> list[ReferenceMotionState]:
-        """Enrich already-resampled clips with simulator-derived body fields."""
-        if not motions:
-            return []
-
-        for motion in motions:
-            self._validate_enrich_input(motion)
-
+        motion: ReferenceMotionState,
+    ) -> ReferenceMotionState:
+        """Enrich one already-resampled clip with simulator-derived body fields."""
+        if not isinstance(motion, ReferenceMotionState):
+            raise TypeError("MotionLib.enrich expects one ReferenceMotionState")
+        self._validate_enrich_input(motion)
         adapter = self._get_enrichment_adapter()
-        rich_motions = []
-        for motion in motions:
-            try:
-                rich_motion = self._enrich_motion(adapter, motion)
-                self._validate_enrich_output(motion, rich_motion)
-            except Exception as exc:
-                identifier = self._motion_identifier(motion)
-                raise type(exc)(f"{identifier}: {exc}") from exc
-            rich_motions.append(rich_motion)
-        return rich_motions
+        try:
+            rich_motion = self._enrich_motion(adapter, motion)
+            self._validate_enrich_output(motion, rich_motion)
+        except Exception as exc:
+            identifier = self._motion_identifier(motion)
+            raise type(exc)(f"{identifier}: {exc}") from exc
+        return rich_motion
 
     def _enrich_motion(
         self,
@@ -407,6 +400,10 @@ class MotionLib:
             clip_starts=motion.clip_starts,
             clip_lengths=motion.clip_lengths,
             clip_fps=motion.clip_fps,
+            clip_name_bytes=motion.clip_name_bytes,
+            clip_name_offsets=motion.clip_name_offsets,
+            dof_names=tuple(adapter.joint_names),
+            body_names=tuple(adapter.body_names),
         )
 
     def _validate_enrich_input(self, motion: ReferenceMotionState) -> None:

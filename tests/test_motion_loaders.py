@@ -235,7 +235,7 @@ def test_reference_motion_npz_loader_loads_train_ready_export(
     motion_path = tmp_path / "walk_retargeted.npz"
     _write_train_ready_npz(motion_path)
 
-    motions = ReferenceMotionNpzLoader(motion_path, fps=50.0).load_motion()
+    motions = MotionLoader.load(motion_path, motion_format="mjlab", fps=50.0)
 
     assert len(motions) == 1
     motion = motions[0]
@@ -253,6 +253,13 @@ def test_reference_motion_npz_loader_loads_train_ready_export(
     assert motion.body_rot is not None
     assert motion.body_lin_vel is not None
     assert motion.body_ang_vel is not None
+    assert motion.clip_starts is None
+    assert motion.clip_lengths is None
+    assert motion.clip_fps is None
+    assert motion.clip_name_bytes is None
+    assert motion.clip_name_offsets is None
+    assert motion.dof_names is None
+    assert motion.body_names is None
 
 
 def test_reference_motion_npz_loader_optionally_loads_body_contacts(

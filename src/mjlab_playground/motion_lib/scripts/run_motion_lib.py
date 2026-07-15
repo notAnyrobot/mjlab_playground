@@ -119,8 +119,6 @@ def run_pipeline(
     motion_lib = motion_lib_cls(cfg)
 
     source_motions = list(motion_lib.load(motion_files))
-    resampled_motions = list(motion_lib.resample(source_motions))
-    rich_motions = list(motion_lib.enrich(resampled_motions))
     writer_cls = writer_cls or _load_writer_class()
     writer = writer_cls()
     export_dir = (
@@ -128,14 +126,20 @@ def run_pipeline(
         if output_dir is not None
         else _default_output_dir(motion_files)
     )
+    resampled_motions: list[Any] = []
+    rich_motions: list[Any] = []
     written_paths: list[Path] = []
-    for motion in rich_motions:
-        output_path = export_dir / _output_filename_for_motion(motion)
+    for source_motion in source_motions:
+        resampled_motion = motion_lib.resample(source_motion)
+        resampled_motions.append(resampled_motion)
+        rich_motion = motion_lib.enrich(resampled_motion)
+        rich_motions.append(rich_motion)
+        output_path = export_dir / _output_filename_for_motion(rich_motion)
         try:
-            writer.write(motion, output_path)
+            writer.write(rich_motion, output_path)
         except Exception as exc:
             raise RuntimeError(
-                f"Failed to export {_motion_identity(motion)} to {output_path}: {exc}"
+                f"Failed to export {_motion_identity(rich_motion)} to {output_path}: {exc}"
             ) from exc
         written_paths.append(output_path)
     return MotionLibRunResult(

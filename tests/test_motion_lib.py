@@ -423,17 +423,6 @@ def test_motion_lib_cfg_validates_v1_pipeline_options() -> None:
         MotionLibCfg(output_fps=0.0)
 
 
-def test_motion_lib_enrich_accepts_empty_batch_without_creating_adapter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
-
-    _reject_adapter_creation(monkeypatch)
-    motion_lib = MotionLib(MotionLibCfg())
-
-    assert motion_lib.enrich([]) == []
-
-
 def test_motion_lib_load_does_not_accept_contact_label_paths() -> None:
     from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
 
@@ -441,6 +430,20 @@ def test_motion_lib_load_does_not_accept_contact_label_paths() -> None:
 
     with pytest.raises(TypeError, match="contact_labels"):
         motion_lib.load("motion.npz", contact_labels="contacts")  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("method_name", ["resample", "enrich"])
+def test_motion_lib_scalar_transformations_reject_collection_inputs(
+    method_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    _reject_adapter_creation(monkeypatch)
+    motion_lib = MotionLib(MotionLibCfg(output_fps=60.0))
+
+    with pytest.raises(TypeError, match="one ReferenceMotionState"):
+        getattr(motion_lib, method_name)([_reference_motion()])
 
 
 def test_motion_lib_loads_pyroki_source_clips_without_contact_labels(
@@ -477,10 +480,8 @@ def test_motion_lib_resamples_loaded_source_clip_to_output_fps(
     )
     source_motion = motion_lib.load(motion_path)[0]
 
-    resampled = motion_lib.resample([source_motion])
+    motion = motion_lib.resample(source_motion)
 
-    assert len(resampled) == 1
-    motion = resampled[0]
     assert motion is not source_motion
     assert motion.name == "walk_retargeted.npz"
     assert motion.display_name == "walk_retargeted"
@@ -519,7 +520,7 @@ def test_motion_lib_resample_rejects_contact_bearing_clip_with_name(
     with pytest.raises(
         ValueError, match="contact_walk_retargeted\\.npz.*foot_contacts"
     ):
-        motion_lib.resample([contact_motion])
+        motion_lib.resample(contact_motion)
 
 
 def test_motion_lib_resample_rejects_rich_clip_with_name(tmp_path: Path) -> None:
@@ -537,7 +538,7 @@ def test_motion_lib_resample_rejects_rich_clip_with_name(tmp_path: Path) -> None
     )
 
     with pytest.raises(ValueError, match="rich_walk_retargeted\\.npz.*body_pos"):
-        motion_lib.resample([rich_motion])
+        motion_lib.resample(rich_motion)
 
 
 def test_motion_lib_full_pipeline_enriches_resampled_clip_without_writing_artifacts(
@@ -565,6 +566,8 @@ def test_motion_lib_full_pipeline_enriches_resampled_clip_without_writing_artifa
             )
             self._reference_frame_cls = ReferenceFrame
             self.current_frame = None
+            self.joint_names = ("left_hip", "right_hip")
+            self.body_names = ("pelvis", "torso")
 
         def apply_frame(self, frame):
             assert frame.root_lin_vel is not None
@@ -604,7 +607,7 @@ def test_motion_lib_full_pipeline_enriches_resampled_clip_without_writing_artifa
         MotionLibCfg(source_format="pyroki", source_fps=30.0, output_fps=60.0)
     )
 
-    rich_motions = motion_lib.enrich(motion_lib.resample(motion_lib.load(motion_path)))
+    rich = motion_lib.enrich(motion_lib.resample(motion_lib.load(motion_path)[0]))
 
     assert FakeMujocoSceneAdapter.init_calls == [
         {
@@ -613,8 +616,6 @@ def test_motion_lib_full_pipeline_enriches_resampled_clip_without_writing_artifa
             "device": torch.device("cpu"),
         }
     ]
-    assert len(rich_motions) == 1
-    rich = rich_motions[0]
     assert rich.name == "walk_retargeted.npz"
     assert rich.display_name == "walk_retargeted"
     assert rich.fps == 60.0
@@ -631,6 +632,8 @@ def test_motion_lib_full_pipeline_enriches_resampled_clip_without_writing_artifa
     assert rich.body_lin_vel.shape == (5, 2, 3)
     assert rich.body_ang_vel is not None
     assert rich.body_ang_vel.shape == (5, 2, 3)
+    assert rich.dof_names == ("left_hip", "right_hip")
+    assert rich.body_names == ("pelvis", "torso")
     assert {path.name for path in tmp_path.iterdir()} == {"walk_retargeted.npz"}
 
 
@@ -648,7 +651,7 @@ def test_motion_lib_enrich_rejects_source_rate_clip_with_name(
         ValueError,
         match="walk_retargeted\\.npz.*cfg\\.output_fps=60\\.0.*motion\\.fps=30\\.0",
     ):
-        motion_lib.enrich([_reference_motion(fps=30.0)])
+        motion_lib.enrich(_reference_motion(fps=30.0))
 
 
 @pytest.mark.parametrize(
@@ -672,7 +675,7 @@ def test_motion_lib_enrich_rejects_existing_rich_body_fields(
     motion = dataclasses.replace(_reference_motion(), **{field_name: value})
 
     with pytest.raises(ValueError, match=f"walk_retargeted\\.npz.*{field_name}"):
-        motion_lib.enrich([motion])
+        motion_lib.enrich(motion)
 
 
 def test_motion_lib_enrich_rejects_source_foot_contacts(
@@ -688,19 +691,24 @@ def test_motion_lib_enrich_rejects_source_foot_contacts(
     )
 
     with pytest.raises(ValueError, match="walk_retargeted\\.npz.*foot_contacts"):
-        motion_lib.enrich([motion])
+        motion_lib.enrich(motion)
 
 
-def test_motion_lib_enrich_batch_failure_names_offending_clip(
+def test_motion_lib_reuses_adapter_across_scalar_enrich_calls_and_names_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import mjlab_playground.motion_lib.motion_lib as motion_lib_module
     from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
 
     class FailingMujocoSceneAdapter:
+        init_count = 0
+
         def __init__(self, cfg) -> None:
+            type(self).init_count += 1
             self.read_count = 0
             self.current_frame = None
+            self.joint_names = ("hip", "knee")
+            self.body_names = ("pelvis",)
 
         def apply_frame(self, frame):
             self.current_frame = frame
@@ -740,10 +748,10 @@ def test_motion_lib_enrich_batch_failure_names_offending_clip(
     )
     motion_lib = MotionLib(MotionLibCfg(output_fps=60.0))
 
+    good = motion_lib.enrich(_reference_motion(name="good_walk.npz"))
+
+    assert good.dof_names == ("hip", "knee")
+    assert good.body_names == ("pelvis",)
     with pytest.raises(RuntimeError, match="bad_walk\\.npz.*simulator rejected pose"):
-        motion_lib.enrich(
-            [
-                _reference_motion(name="good_walk.npz"),
-                _reference_motion(name="bad_walk.npz"),
-            ]
-        )
+        motion_lib.enrich(_reference_motion(name="bad_walk.npz"))
+    assert FailingMujocoSceneAdapter.init_count == 1

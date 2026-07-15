@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import torch
+
+from mjlab_playground.motion_lib._reference_motion_npz_schema import (
+    REFERENCE_MOTION_NPZ_V1,
+)
 
 MotionFormat = Literal["pyroki", "proto", "mjlab"]
 
@@ -244,6 +249,10 @@ class ReferenceMotion:
     clip_starts: torch.Tensor | None = None
     clip_lengths: torch.Tensor | None = None
     clip_fps: torch.Tensor | None = None
+    clip_name_bytes: torch.Tensor | None = None
+    clip_name_offsets: torch.Tensor | None = None
+    dof_names: tuple[str, ...] | None = None
+    body_names: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fps", _validate_integer_fps(self.fps))
@@ -293,6 +302,8 @@ class ReferenceMotion:
         self._validate_optional_contacts()
         self._validate_optional_foot_contacts()
         self._validate_package_metadata()
+        self._validate_axis_names()
+        self._validate_clip_names()
 
     @classmethod
     def from_frames(
@@ -305,6 +316,10 @@ class ReferenceMotion:
         clip_starts: torch.Tensor | None = None,
         clip_lengths: torch.Tensor | None = None,
         clip_fps: torch.Tensor | None = None,
+        clip_name_bytes: torch.Tensor | None = None,
+        clip_name_offsets: torch.Tensor | None = None,
+        dof_names: tuple[str, ...] | None = None,
+        body_names: tuple[str, ...] | None = None,
     ) -> "ReferenceMotion":
         """Construct a tensor-backed reference motion from frame values."""
         if not frames:
@@ -331,6 +346,281 @@ class ReferenceMotion:
             clip_starts=clip_starts,
             clip_lengths=clip_lengths,
             clip_fps=clip_fps,
+            clip_name_bytes=clip_name_bytes,
+            clip_name_offsets=clip_name_offsets,
+            dof_names=dof_names,
+            body_names=body_names,
+        )
+
+    @classmethod
+    def from_clips(
+        cls,
+        clips: Iterable["ReferenceMotion"],
+        *,
+        device: str | torch.device = "cpu",
+    ) -> "ReferenceMotion":
+        """Perform reference motion assembly over rich reference clips."""
+        clip_list = list(clips)
+        if not clip_list:
+            raise ValueError("ReferenceMotion.from_clips requires at least one clip")
+
+        selected_device = torch.device(device)
+        clip_name_parts: list[torch.Tensor] = []
+        clip_name_offsets = [0]
+        clip_lengths: list[int] = []
+        first = clip_list[0]
+
+        def validate_tensor(
+            clip: "ReferenceMotion",
+            clip_id: int,
+            field_name: str,
+            shape_suffix: tuple[int | None, ...],
+            *,
+            frame_count: int | None = None,
+            dtype: torch.dtype | None = None,
+        ) -> torch.Tensor:
+            value = getattr(clip, field_name)
+            if value is None:
+                raise ValueError(
+                    f"clip {clip_id} requires rich reference field {field_name}"
+                )
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(
+                    f"clip {clip_id} field {field_name} must be a torch.Tensor"
+                )
+            try:
+                _validate_float_tensor(
+                    value,
+                    field_name=field_name,
+                    shape_suffix=shape_suffix,
+                    frame_count=frame_count,
+                    dtype=dtype,
+                    device=selected_device,
+                )
+            except (TypeError, ValueError) as exc:
+                raise type(exc)(f"clip {clip_id} {exc}") from exc
+            return value
+
+        for clip_id, clip in enumerate(clip_list):
+            if not isinstance(clip, cls):
+                raise TypeError(
+                    f"clip {clip_id} must be a ReferenceMotion, got {type(clip).__name__}"
+                )
+
+            root_pos = validate_tensor(clip, clip_id, "root_pos", (3,))
+            frame_count = root_pos.shape[0]
+            dtype = root_pos.dtype
+            root_rot = validate_tensor(
+                clip,
+                clip_id,
+                "root_rot",
+                (4,),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            dof_pos = validate_tensor(
+                clip,
+                clip_id,
+                "dof_pos",
+                (None,),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            validate_tensor(
+                clip,
+                clip_id,
+                "root_lin_vel",
+                (3,),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            validate_tensor(
+                clip,
+                clip_id,
+                "root_ang_vel",
+                (3,),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            validate_tensor(
+                clip,
+                clip_id,
+                "dof_vel",
+                (dof_pos.shape[1],),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            body_pos = validate_tensor(
+                clip,
+                clip_id,
+                "body_pos",
+                (None, 3),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            body_count = body_pos.shape[1]
+            body_rot = validate_tensor(
+                clip,
+                clip_id,
+                "body_rot",
+                (body_count, 4),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            validate_tensor(
+                clip,
+                clip_id,
+                "body_lin_vel",
+                (body_count, 3),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            validate_tensor(
+                clip,
+                clip_id,
+                "body_ang_vel",
+                (body_count, 3),
+                frame_count=frame_count,
+                dtype=dtype,
+            )
+            if clip.foot_contacts is not None:
+                raise ValueError(
+                    f"clip {clip_id} contains source foot_contacts; "
+                    "assembly accepts body_contacts only"
+                )
+            if clip.root_pos.shape[0] < 3:
+                raise ValueError(
+                    f"clip {clip_id} rich reference clip must contain at least 3 frames"
+                )
+            if clip.dof_names is None:
+                raise ValueError(f"clip {clip_id} requires dof_names")
+            if clip.body_names is None:
+                raise ValueError(f"clip {clip_id} requires body_names")
+            if clip.body_contacts is not None:
+                if clip.body_contacts.device != selected_device:
+                    raise ValueError(
+                        f"clip {clip_id} body_contacts device must match selected "
+                        f"device {selected_device}, got {clip.body_contacts.device}"
+                    )
+            try:
+                _validate_quaternion_tensor(root_rot, field_name="root_rot")
+                _validate_quaternion_tensor(body_rot, field_name="body_rot")
+            except ValueError as exc:
+                raise ValueError(f"clip {clip_id} {exc}") from exc
+
+            if clip_id > 0:
+                if clip.fps != first.fps:
+                    raise ValueError(
+                        f"clip {clip_id} fps must match clip 0 fps "
+                        f"{first.fps}, got {clip.fps}"
+                    )
+                if clip.root_pos.dtype != first.root_pos.dtype:
+                    raise ValueError(
+                        f"clip {clip_id} dtype must match clip 0 dtype "
+                        f"{first.root_pos.dtype}, got {clip.root_pos.dtype}"
+                    )
+                if clip.dof_pos.shape[1] != first.dof_pos.shape[1]:
+                    raise ValueError(
+                        f"clip {clip_id} DOF count must match clip 0 DOF count "
+                        f"{first.dof_pos.shape[1]}, got {clip.dof_pos.shape[1]}"
+                    )
+                assert clip.body_pos is not None
+                assert first.body_pos is not None
+                if clip.body_pos.shape[1] != first.body_pos.shape[1]:
+                    raise ValueError(
+                        f"clip {clip_id} body count must match clip 0 body count "
+                        f"{first.body_pos.shape[1]}, got {clip.body_pos.shape[1]}"
+                    )
+                if clip.dof_names != first.dof_names:
+                    raise ValueError(
+                        f"clip {clip_id} dof_names must match clip 0 in order"
+                    )
+                if clip.body_names != first.body_names:
+                    raise ValueError(
+                        f"clip {clip_id} body_names must match clip 0 in order"
+                    )
+                if (clip.body_contacts is None) != (first.body_contacts is None):
+                    raise ValueError(
+                        f"clip {clip_id} body_contacts presence must match clip 0"
+                    )
+                if (
+                    clip.body_contacts is not None
+                    and first.body_contacts is not None
+                    and clip.body_contacts.dtype != first.body_contacts.dtype
+                ):
+                    raise ValueError(
+                        f"clip {clip_id} body_contacts dtype must match clip 0 dtype "
+                        f"{first.body_contacts.dtype}, got {clip.body_contacts.dtype}"
+                    )
+            if clip.clip_starts is not None:
+                if clip.clip_starts.numel() != 1:
+                    raise ValueError(
+                        f"clip {clip_id} is already multi-clip; "
+                        "ReferenceMotion.from_clips accepts one-clip inputs"
+                    )
+                if clip.clip_name_bytes is None or clip.clip_name_offsets is None:
+                    raise ValueError(
+                        f"clip {clip_id} explicit metadata requires a clip identity"
+                    )
+                encoded_name = clip.clip_name_bytes
+            else:
+                if not clip.name:
+                    raise ValueError(f"clip {clip_id} requires a clip identity")
+                try:
+                    encoded_name = torch.tensor(
+                        list(clip.name.encode("utf-8")), dtype=torch.uint8
+                    )
+                except UnicodeEncodeError as exc:
+                    raise ValueError(
+                        f"clip {clip_id} name must be valid UTF-8"
+                    ) from exc
+            clip_name_parts.append(encoded_name)
+            clip_name_offsets.append(clip_name_offsets[-1] + encoded_name.numel())
+            clip_lengths.append(clip.root_pos.shape[0])
+
+        contacts_present = [clip.body_contacts is not None for clip in clip_list]
+        lengths = torch.tensor(clip_lengths, dtype=torch.int64, device=selected_device)
+        starts = torch.empty_like(lengths)
+        starts[0] = 0
+        if len(clip_list) > 1:
+            starts[1:] = torch.cumsum(lengths[:-1], dim=0)
+
+        def concatenate(field_name: str) -> torch.Tensor:
+            values = [getattr(clip, field_name) for clip in clip_list]
+            assert all(isinstance(value, torch.Tensor) for value in values)
+            return torch.cat(values, dim=0)
+
+        packed_body_contacts: torch.Tensor | None = None
+        if all(contacts_present):
+            contact_values = [clip.body_contacts for clip in clip_list]
+            assert all(value is not None for value in contact_values)
+            packed_body_contacts = torch.cat(
+                [value for value in contact_values if value is not None], dim=0
+            )
+        return cls(
+            fps=first.fps,
+            root_pos=concatenate("root_pos"),
+            root_rot=concatenate("root_rot"),
+            dof_pos=concatenate("dof_pos"),
+            root_lin_vel=concatenate("root_lin_vel"),
+            root_ang_vel=concatenate("root_ang_vel"),
+            dof_vel=concatenate("dof_vel"),
+            body_pos=concatenate("body_pos"),
+            body_rot=concatenate("body_rot"),
+            body_lin_vel=concatenate("body_lin_vel"),
+            body_ang_vel=concatenate("body_ang_vel"),
+            body_contacts=packed_body_contacts,
+            clip_starts=starts,
+            clip_lengths=lengths,
+            clip_fps=torch.tensor(
+                [clip.fps for clip in clip_list],
+                dtype=torch.float32,
+                device=selected_device,
+            ),
+            clip_name_bytes=torch.cat(clip_name_parts),
+            clip_name_offsets=torch.tensor(clip_name_offsets, dtype=torch.int64),
+            dof_names=first.dof_names,
+            body_names=first.body_names,
         )
 
     @staticmethod
@@ -521,6 +811,161 @@ class ReferenceMotion:
         total_frames = int(self.clip_lengths.sum().item())
         if total_frames != self.root_pos.shape[0]:
             raise ValueError("clip spans must cover the packed frame tensors")
+
+    def _validate_axis_names(self) -> None:
+        if self.dof_names is not None:
+            self._validate_name_sequence(
+                self.dof_names,
+                field_name="dof_names",
+                expected_count=self.dof_pos.shape[1],
+            )
+        if self.body_names is None:
+            return
+        self._validate_name_sequence(
+            self.body_names,
+            field_name="body_names",
+            expected_count=len(self.body_names),
+        )
+        body_count = len(self.body_names)
+        for field_name in (
+            "body_pos",
+            "body_rot",
+            "body_lin_vel",
+            "body_ang_vel",
+            "body_contacts",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and value.shape[1] != body_count:
+                raise ValueError(
+                    f"{field_name} body axis must match body_names count "
+                    f"{body_count}, got {value.shape[1]}"
+                )
+
+    @staticmethod
+    def _validate_name_sequence(
+        names: tuple[str, ...],
+        *,
+        field_name: str,
+        expected_count: int,
+    ) -> None:
+        if not isinstance(names, tuple):
+            raise TypeError(f"{field_name} must be a tuple of strings")
+        if len(names) != expected_count:
+            raise ValueError(
+                f"{field_name} count must match its tensor axis "
+                f"{expected_count}, got {len(names)}"
+            )
+        for name in names:
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"{field_name} must contain non-empty strings")
+            try:
+                name.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    f"{field_name} must contain valid UTF-8 strings"
+                ) from exc
+
+    def _validate_clip_names(self) -> None:
+        metadata = (self.clip_name_bytes, self.clip_name_offsets)
+        if all(value is None for value in metadata):
+            return
+        if any(value is None for value in metadata):
+            raise ValueError(
+                "clip_name_bytes and clip_name_offsets must be provided together"
+            )
+        if self.clip_starts is None:
+            raise ValueError("clip names require explicit clip metadata")
+        assert self.clip_name_bytes is not None
+        assert self.clip_name_offsets is not None
+        if self.clip_name_bytes.device.type != "cpu":
+            raise ValueError("clip_name_bytes must remain on CPU")
+        if self.clip_name_offsets.device.type != "cpu":
+            raise ValueError("clip_name_offsets must remain on CPU")
+        if self.clip_name_bytes.ndim != 1 or self.clip_name_bytes.dtype != torch.uint8:
+            raise TypeError("clip_name_bytes must be a 1D uint8 tensor")
+        if self.clip_name_offsets.ndim != 1 or self.clip_name_offsets.dtype not in (
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        ):
+            raise TypeError("clip_name_offsets must be a 1D integer tensor")
+        expected_offset_count = self.clip_starts.numel() + 1
+        if self.clip_name_offsets.numel() != expected_offset_count:
+            raise ValueError(
+                "clip_name_offsets must contain one more entry than the clip count"
+            )
+        offsets = self.clip_name_offsets.tolist()
+        if offsets[0] != 0 or offsets[-1] != self.clip_name_bytes.numel():
+            raise ValueError("clip_name_offsets must span clip_name_bytes exactly")
+        adjacent_offsets = zip(offsets[:-1], offsets[1:], strict=True)
+        if any(start >= end for start, end in adjacent_offsets):
+            raise ValueError("clip names must be non-empty contiguous byte spans")
+        encoded_names = self.clip_name_bytes.numpy()
+        adjacent_offsets = zip(offsets[:-1], offsets[1:], strict=True)
+        for clip_id, (start, end) in enumerate(adjacent_offsets):
+            if not self._is_valid_utf8(encoded_names[start:end]):
+                raise ValueError(f"clip {clip_id} name is not valid UTF-8")
+
+    @staticmethod
+    def _is_valid_utf8(encoded: np.ndarray) -> bool:
+        index = 0
+        while index < len(encoded):
+            first = int(encoded[index])
+            if first <= 0x7F:
+                index += 1
+                continue
+            if 0xC2 <= first <= 0xDF:
+                continuation_ranges = ((0x80, 0xBF),)
+            elif first == 0xE0:
+                continuation_ranges = ((0xA0, 0xBF), (0x80, 0xBF))
+            elif 0xE1 <= first <= 0xEC or 0xEE <= first <= 0xEF:
+                continuation_ranges = ((0x80, 0xBF), (0x80, 0xBF))
+            elif first == 0xED:
+                continuation_ranges = ((0x80, 0x9F), (0x80, 0xBF))
+            elif first == 0xF0:
+                continuation_ranges = (
+                    (0x90, 0xBF),
+                    (0x80, 0xBF),
+                    (0x80, 0xBF),
+                )
+            elif 0xF1 <= first <= 0xF3:
+                continuation_ranges = (
+                    (0x80, 0xBF),
+                    (0x80, 0xBF),
+                    (0x80, 0xBF),
+                )
+            elif first == 0xF4:
+                continuation_ranges = (
+                    (0x80, 0x8F),
+                    (0x80, 0xBF),
+                    (0x80, 0xBF),
+                )
+            else:
+                return False
+            if index + len(continuation_ranges) >= len(encoded):
+                return False
+            for offset, (lower, upper) in enumerate(continuation_ranges, start=1):
+                if not lower <= int(encoded[index + offset]) <= upper:
+                    return False
+            index += len(continuation_ranges) + 1
+        return True
+
+    def clip_name(self, clip_id: int) -> str:
+        """Decode one clip's UTF-8 identity on demand."""
+        if not isinstance(clip_id, int):
+            raise TypeError("clip_id must be an int")
+        if self.clip_name_bytes is None or self.clip_name_offsets is None:
+            raise ValueError("reference motion does not contain clip-name metadata")
+        clip_count = self.clip_name_offsets.numel() - 1
+        if clip_id < 0 or clip_id >= clip_count:
+            raise IndexError(f"clip_id {clip_id} out of range for {clip_count} clips")
+        start = int(self.clip_name_offsets[clip_id].item())
+        end = int(self.clip_name_offsets[clip_id + 1].item())
+        try:
+            return bytes(self.clip_name_bytes[start:end].tolist()).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"clip {clip_id} name is not valid UTF-8") from exc
 
 
 ReferenceMotionState = ReferenceMotion
@@ -766,20 +1211,7 @@ class PyrokiMotionLoader(MotionLoader):
 
 
 class ReferenceMotionNpzLoader(MotionLoader):
-    """Load MotionLib train-ready ``.npz`` clips into reference motion states."""
-
-    _REQUIRED_KEYS = (
-        "root_pos",
-        "root_rot",
-        "dof_pos",
-        "root_lin_vel",
-        "root_ang_vel",
-        "dof_vel",
-        "body_pos",
-        "body_rot",
-        "body_lin_vel",
-        "body_ang_vel",
-    )
+    """Load legacy or versioned reference motion ``.npz`` artifacts."""
 
     def __init__(
         self,
@@ -827,8 +1259,11 @@ class ReferenceMotionNpzLoader(MotionLoader):
 
     def _load_file(self, motion_path: Path) -> ReferenceMotionState:
         with np.load(motion_path, allow_pickle=False) as data:
+            if REFERENCE_MOTION_NPZ_V1.version_key in data.files:
+                return self._load_versioned_file(data, motion_path)
             arrays = {
-                key: self._load_float_array(data, key) for key in self._REQUIRED_KEYS
+                key: self._load_float_array(data, key)
+                for key in REFERENCE_MOTION_NPZ_V1.required_tensor_keys
             }
             body_contacts = self._load_optional_contacts(data)
 
@@ -848,6 +1283,125 @@ class ReferenceMotionNpzLoader(MotionLoader):
             body_ang_vel=self._to_tensor(arrays["body_ang_vel"]),
             body_contacts=body_contacts,
         )
+
+    def _load_versioned_file(
+        self,
+        data: np.lib.npyio.NpzFile,
+        motion_path: Path,
+    ) -> ReferenceMotionState:
+        schema_version = self._load_schema_version(data)
+        if schema_version != REFERENCE_MOTION_NPZ_V1.version:
+            raise ValueError(
+                "Unsupported reference motion schema version "
+                f"{schema_version}; supported version is "
+                f"{REFERENCE_MOTION_NPZ_V1.version}"
+            )
+        for key in REFERENCE_MOTION_NPZ_V1.required_metadata_keys:
+            if key not in data.files:
+                raise ValueError(
+                    f"Missing required versioned reference motion key {key!r}"
+                )
+
+        arrays = {
+            key: self._load_float_array(data, key)
+            for key in REFERENCE_MOTION_NPZ_V1.required_tensor_keys
+        }
+        fps = self._load_scalar_fps(data)
+        clip_starts = self._load_integer_metadata(
+            data, REFERENCE_MOTION_NPZ_V1.clip_starts_key
+        )
+        clip_lengths = self._load_integer_metadata(
+            data, REFERENCE_MOTION_NPZ_V1.clip_lengths_key
+        )
+        clip_fps = self._load_float_array(data, REFERENCE_MOTION_NPZ_V1.clip_fps_key)
+        clip_name_bytes = self._load_clip_name_bytes(data)
+        clip_name_offsets = self._load_integer_metadata(
+            data,
+            REFERENCE_MOTION_NPZ_V1.clip_name_offsets_key,
+            device=torch.device("cpu"),
+        )
+        dof_names = self._load_names(data, REFERENCE_MOTION_NPZ_V1.dof_names_key)
+        body_names = self._load_names(data, REFERENCE_MOTION_NPZ_V1.body_names_key)
+        short_clip_ids = torch.nonzero(clip_lengths < 3).flatten()
+        if short_clip_ids.numel() > 0:
+            clip_id = int(short_clip_ids[0].item())
+            raise ValueError(
+                f"Schema version 1 rich clip {clip_id} must contain at least 3 frames"
+            )
+
+        return ReferenceMotionState(
+            name=motion_path.name,
+            display_name=motion_path.stem,
+            fps=fps,
+            root_pos=self._to_tensor(arrays["root_pos"]),
+            root_rot=self._to_tensor(arrays["root_rot"]),
+            dof_pos=self._to_tensor(arrays["dof_pos"]),
+            root_lin_vel=self._to_tensor(arrays["root_lin_vel"]),
+            root_ang_vel=self._to_tensor(arrays["root_ang_vel"]),
+            dof_vel=self._to_tensor(arrays["dof_vel"]),
+            body_pos=self._to_tensor(arrays["body_pos"]),
+            body_rot=self._to_tensor(arrays["body_rot"]),
+            body_lin_vel=self._to_tensor(arrays["body_lin_vel"]),
+            body_ang_vel=self._to_tensor(arrays["body_ang_vel"]),
+            body_contacts=self._load_optional_contacts(data),
+            clip_starts=clip_starts,
+            clip_lengths=clip_lengths,
+            clip_fps=torch.as_tensor(clip_fps, device=self.device),
+            clip_name_bytes=clip_name_bytes,
+            clip_name_offsets=clip_name_offsets,
+            dof_names=dof_names,
+            body_names=body_names,
+        )
+
+    @staticmethod
+    def _load_schema_version(data: np.lib.npyio.NpzFile) -> int:
+        array = np.asarray(data[REFERENCE_MOTION_NPZ_V1.version_key])
+        if array.ndim != 0 or not np.issubdtype(array.dtype, np.integer):
+            raise ValueError("'schema_version' must be an integer scalar")
+        return int(array.item())
+
+    @staticmethod
+    def _load_scalar_fps(data: np.lib.npyio.NpzFile) -> float:
+        key = REFERENCE_MOTION_NPZ_V1.fps_key
+        array = np.asarray(data[key])
+        is_real_number = np.issubdtype(array.dtype, np.integer) or np.issubdtype(
+            array.dtype, np.floating
+        )
+        if array.ndim != 0 or not is_real_number:
+            raise ValueError(f"{key!r} must be a numeric scalar")
+        return _validate_integer_fps(float(array.item()), field_name=key)
+
+    def _load_integer_metadata(
+        self,
+        data: np.lib.npyio.NpzFile,
+        key: str,
+        *,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        array = np.asarray(data[key])
+        if array.ndim != 1 or not np.issubdtype(array.dtype, np.integer):
+            raise ValueError(f"{key!r} must be a 1D integer array")
+        return torch.as_tensor(array, device=device or self.device)
+
+    @staticmethod
+    def _load_clip_name_bytes(data: np.lib.npyio.NpzFile) -> torch.Tensor:
+        key = REFERENCE_MOTION_NPZ_V1.clip_name_bytes_key
+        array = np.asarray(data[key])
+        if array.ndim != 1 or array.dtype != np.uint8:
+            raise ValueError(f"{key!r} must be a 1D uint8 array")
+        return torch.as_tensor(array.copy(), dtype=torch.uint8, device="cpu")
+
+    @staticmethod
+    def _load_names(data: np.lib.npyio.NpzFile, key: str) -> tuple[str, ...]:
+        array = np.asarray(data[key])
+        if array.ndim != 1 or array.dtype.kind not in ("U", "S"):
+            raise ValueError(f"{key!r} must be a 1D string array")
+        try:
+            if array.dtype.kind == "S":
+                return tuple(bytes(value).decode("utf-8") for value in array)
+            return tuple(str(value) for value in array)
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{key!r} contains invalid UTF-8") from exc
 
     @staticmethod
     def _load_float_array(

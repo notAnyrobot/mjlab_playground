@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_MOTION_LIB_PATH = (
@@ -91,15 +92,15 @@ def test_run_motion_lib_pipeline_calls_load_resample_enrich_in_order(
 
         def load(self, motion_files: Path):
             calls.append(("load", motion_files))
-            return ["source-motion"]
+            return ["source-a", "source-b"]
 
-        def resample(self, motions):
-            calls.append(("resample", motions))
-            return ["resampled-motion"]
+        def resample(self, motion):
+            calls.append(("resample", motion))
+            return f"resampled-{motion}"
 
-        def enrich(self, motions):
-            calls.append(("enrich", motions))
-            return [SimpleNamespace(name="rich-motion.npz")]
+        def enrich(self, motion):
+            calls.append(("enrich", motion))
+            return SimpleNamespace(name=f"rich-{motion}.npz")
 
     class FakeWriter:
         def write(self, motion, output_path: Path) -> None:
@@ -128,19 +129,33 @@ def test_run_motion_lib_pipeline_calls_load_resample_enrich_in_order(
     assert cfg.device == "cpu"
     assert calls[1:] == [
         ("load", motion_path),
-        ("resample", ["source-motion"]),
-        ("enrich", ["resampled-motion"]),
+        ("resample", "source-a"),
+        ("enrich", "resampled-source-a"),
         (
             "write",
-            "rich-motion.npz",
-            tmp_path.parent / "mjlab-astro" / "rich-motion.npz",
+            "rich-resampled-source-a.npz",
+            tmp_path.parent / "mjlab-astro" / "rich-resampled-source-a.npz",
+        ),
+        ("resample", "source-b"),
+        ("enrich", "resampled-source-b"),
+        (
+            "write",
+            "rich-resampled-source-b.npz",
+            tmp_path.parent / "mjlab-astro" / "rich-resampled-source-b.npz",
         ),
     ]
-    assert result.source_motions == ["source-motion"]
-    assert result.resampled_motions == ["resampled-motion"]
-    assert result.rich_motions == [SimpleNamespace(name="rich-motion.npz")]
+    assert result.source_motions == ["source-a", "source-b"]
+    assert result.resampled_motions == [
+        "resampled-source-a",
+        "resampled-source-b",
+    ]
+    assert result.rich_motions == [
+        SimpleNamespace(name="rich-resampled-source-a.npz"),
+        SimpleNamespace(name="rich-resampled-source-b.npz"),
+    ]
     assert result.written_paths == [
-        tmp_path.parent / "mjlab-astro" / "rich-motion.npz"
+        tmp_path.parent / "mjlab-astro" / "rich-resampled-source-a.npz",
+        tmp_path.parent / "mjlab-astro" / "rich-resampled-source-b.npz",
     ]
 
 
@@ -162,15 +177,15 @@ def test_run_motion_lib_exports_rich_motions_to_explicit_output_dir(
 
         def load(self, motion_files: Path):
             calls.append(("load", motion_files))
-            return ["source-motion"]
+            return ["source-walk", "source-turn"]
 
-        def resample(self, motions):
-            calls.append(("resample", motions))
-            return ["resampled-motion"]
+        def resample(self, motion):
+            calls.append(("resample", motion))
+            return f"resampled-{motion}"
 
-        def enrich(self, motions):
-            calls.append(("enrich", motions))
-            return rich_motions
+        def enrich(self, motion):
+            calls.append(("enrich", motion))
+            return rich_motions[0] if motion.endswith("walk") else rich_motions[1]
 
     class FakeWriter:
         def write(self, motion, output_path: Path) -> None:
@@ -189,9 +204,11 @@ def test_run_motion_lib_exports_rich_motions_to_explicit_output_dir(
 
     assert calls[1:] == [
         ("load", motion_path),
-        ("resample", ["source-motion"]),
-        ("enrich", ["resampled-motion"]),
+        ("resample", "source-walk"),
+        ("enrich", "resampled-source-walk"),
         ("write", "walk_retargeted.npz", output_dir / "walk_retargeted.npz"),
+        ("resample", "source-turn"),
+        ("enrich", "resampled-source-turn"),
         ("write", "turn_retargeted", output_dir / "turn_retargeted.npz"),
     ]
     assert result.written_paths == [
@@ -215,11 +232,11 @@ def test_run_motion_lib_defaults_output_dir_next_to_source_directory(
         def load(self, motion_files: Path):
             return ["source-motion"]
 
-        def resample(self, motions):
-            return ["resampled-motion"]
+        def resample(self, motion):
+            return "resampled-motion"
 
-        def enrich(self, motions):
-            return [SimpleNamespace(name="walk_retargeted.npz")]
+        def enrich(self, motion):
+            return SimpleNamespace(name="walk_retargeted.npz")
 
     class FakeWriter:
         def write(self, motion, output_path: Path) -> None:
@@ -256,10 +273,10 @@ def test_run_motion_lib_does_not_guess_pyroki_child_from_split_root(
             assert motion_files == split_root
             raise ValueError(f"No direct child .npz files found in {motion_files}")
 
-        def resample(self, motions):
+        def resample(self, motion):
             raise AssertionError("resample should not run after a load failure")
 
-        def enrich(self, motions):
+        def enrich(self, motion):
             raise AssertionError("enrich should not run after a load failure")
 
     class FakeWriter:
@@ -292,11 +309,11 @@ def test_run_motion_lib_export_failure_names_offending_motion(
         def load(self, motion_files: Path):
             return ["source-motion"]
 
-        def resample(self, motions):
-            return ["resampled-motion"]
+        def resample(self, motion):
+            return "resampled-motion"
 
-        def enrich(self, motions):
-            return [SimpleNamespace(name="bad_walk.npz")]
+        def enrich(self, motion):
+            return SimpleNamespace(name="bad_walk.npz")
 
     class FailingWriter:
         def write(self, motion, output_path: Path) -> None:
@@ -314,6 +331,74 @@ def test_run_motion_lib_export_failure_names_offending_motion(
         )
 
 
+def test_run_motion_lib_outputs_load_and_assemble_as_versioned_clips(
+    tmp_path: Path,
+) -> None:
+    run_motion_lib = _load_run_motion_lib_module()
+    from mjlab_playground.motion_lib import ReferenceMotion, ReferenceMotionState
+    from mjlab_playground.motion_lib.motion_loader import MotionLoader
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    class FakeMotionLib:
+        def __init__(self, cfg) -> None:
+            pass
+
+        def load(self, motion_files: Path):
+            return ["walk", "turn"]
+
+        def resample(self, motion):
+            return motion
+
+        def enrich(self, motion):
+            offset = 0.0 if motion == "walk" else 10.0
+            frame_values = torch.arange(3, dtype=torch.float32) + offset
+            return ReferenceMotionState(
+                name=f"{motion}.npz",
+                fps=50.0,
+                root_pos=frame_values[:, None].repeat(1, 3),
+                root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
+                dof_pos=frame_values[:, None].repeat(1, 2),
+                root_lin_vel=torch.ones(3, 3),
+                root_ang_vel=torch.ones(3, 3),
+                dof_vel=torch.ones(3, 2),
+                body_pos=frame_values[:, None, None].repeat(1, 2, 3),
+                body_rot=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(3, 2, 1),
+                body_lin_vel=torch.ones(3, 2, 3),
+                body_ang_vel=torch.ones(3, 2, 3),
+                dof_names=("left_hip", "right_hip"),
+                body_names=("pelvis", "torso"),
+            )
+
+    def fake_cfg_cls(**kwargs):
+        return SimpleNamespace(**kwargs)
+
+    output_dir = tmp_path / "mjlab-astro"
+    result = run_motion_lib.run_pipeline(
+        tmp_path / "pyroki",
+        output_dir=output_dir,
+        motion_lib_cls=FakeMotionLib,
+        motion_lib_cfg_cls=fake_cfg_cls,
+        writer_cls=ReferenceMotionNpzWriter,
+    )
+
+    loaded_clips = [
+        MotionLoader.load(path, motion_format="mjlab")[0]
+        for path in result.written_paths
+    ]
+    assembled = ReferenceMotion.from_clips(loaded_clips)
+
+    assert [clip.clip_name(0) for clip in loaded_clips] == [
+        "walk.npz",
+        "turn.npz",
+    ]
+    assert assembled.dof_names == ("left_hip", "right_hip")
+    assert assembled.body_names == ("pelvis", "torso")
+    torch.testing.assert_close(assembled.clip_starts, torch.tensor([0, 3]))
+    torch.testing.assert_close(assembled.clip_lengths, torch.tensor([3, 3]))
+
+
 def test_run_motion_lib_main_returns_pipeline_result(tmp_path: Path) -> None:
     run_motion_lib = _load_run_motion_lib_module()
 
@@ -324,11 +409,11 @@ def test_run_motion_lib_main_returns_pipeline_result(tmp_path: Path) -> None:
         def load(self, motion_files: Path):
             return ["source-motion"]
 
-        def resample(self, motions):
-            return ["resampled-motion"]
+        def resample(self, motion):
+            return "resampled-motion"
 
-        def enrich(self, motions):
-            return [SimpleNamespace(name="rich-motion.npz")]
+        def enrich(self, motion):
+            return SimpleNamespace(name="rich-motion.npz")
 
     class FakeWriter:
         def write(self, motion, output_path: Path) -> None:
@@ -354,9 +439,7 @@ def test_run_motion_lib_main_returns_pipeline_result(tmp_path: Path) -> None:
     assert result.source_motions == ["source-motion"]
     assert result.resampled_motions == ["resampled-motion"]
     assert result.rich_motions == [SimpleNamespace(name="rich-motion.npz")]
-    assert result.written_paths == [
-        tmp_path.parent / "mjlab-astro" / "rich-motion.npz"
-    ]
+    assert result.written_paths == [tmp_path.parent / "mjlab-astro" / "rich-motion.npz"]
 
 
 def test_run_motion_lib_main_reports_written_paths(
@@ -370,16 +453,13 @@ def test_run_motion_lib_main_reports_written_paths(
             pass
 
         def load(self, motion_files: Path):
-            return ["source-motion"]
+            return ["walk_retargeted", "turn_retargeted"]
 
-        def resample(self, motions):
-            return ["resampled-motion"]
+        def resample(self, motion):
+            return motion
 
-        def enrich(self, motions):
-            return [
-                SimpleNamespace(name="walk_retargeted.npz"),
-                SimpleNamespace(name="turn_retargeted.npz"),
-            ]
+        def enrich(self, motion):
+            return SimpleNamespace(name=f"{motion}.npz")
 
     class FakeWriter:
         def write(self, motion, output_path: Path) -> None:
