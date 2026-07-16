@@ -84,9 +84,9 @@ Transfer it to HPC and load it there:
 ```bash
 rsync -avh \
   /media/android/data/docker_images/mjlab_playground_cuda128_dev.tar \
-  atom7@192.168.24.9:/data/atom7/Data/docker_images/
+  atom7@172.16.9.7:/data/atom7/Data/docker_images/
 
-ssh atom7@192.168.24.9 \
+ssh atom7@172.16.9.7 \
   'docker load -i /data/atom7/Data/docker_images/mjlab_playground_cuda128_dev.tar'
 ```
 

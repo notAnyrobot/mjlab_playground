@@ -166,10 +166,10 @@ HPC playground:       /data/atom7/Code/mujocolab/mjlab_playground
 Transfer the image archive:
 
 ```bash
-ssh atom7@192.168.24.9 'mkdir -p /data/atom7/Data/docker_images /data/atom7/Code/mujocolab'
+ssh atom7@172.16.9.7 'mkdir -p /data/atom7/Data/docker_images /data/atom7/Code/mujocolab'
 rsync -avh \
   /media/android/data/docker_images/mjlab_playground_cuda128_dev.tar \
-  atom7@192.168.24.9:/data/atom7/Data/docker_images/
+  atom7@172.16.9.7:/data/atom7/Data/docker_images/
 ```
 
 ## 4. Sync Source To HPC
@@ -184,7 +184,7 @@ For ad hoc iteration, use the repo helper for `mjlab_playground`:
 The helper syncs this checkout to:
 
 ```text
-atom7@192.168.24.9:/data/atom7/Code/mujocolab/mjlab_playground
+atom7@172.16.9.7:/data/atom7/Code/mujocolab/mjlab_playground
 ```
 
 It excludes local runtime outputs such as `logs/`, `wandb/`, `artifacts/`, and
@@ -200,7 +200,7 @@ rsync -avh \
   --exclude .ruff_cache \
   --exclude .pytest_cache \
   /home/android/Code/mujocolab/mjlab/ \
-  atom7@192.168.24.9:/data/atom7/Code/mujocolab/mjlab/
+  atom7@172.16.9.7:/data/atom7/Code/mujocolab/mjlab/
 ```
 
 Datasets and local symlink layers are not part of this code sync unless you

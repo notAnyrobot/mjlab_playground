@@ -60,7 +60,7 @@ def test_push_deletes_stale_remote_source_without_deleting_artifacts(
 ) -> None:
   args = _run_sync("push", tmp_path)
 
-  assert "atom7@192.168.24.9:/data/atom7/Code/mujocolab/mjlab_playground/" in args
+  assert "atom7@172.16.9.7:/data/atom7/Code/mujocolab/mjlab_playground/" in args
   assert "--delete" in args
   assert "--delete-excluded" not in args
   for excluded in ("data/", "logs/", "wandb/", "artifacts/"):
