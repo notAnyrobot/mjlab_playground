@@ -312,8 +312,6 @@ def _recording_motion_names(motions: Sequence[Any]) -> list[str]:
     for motion in motions:
         name = getattr(motion, "name", None)
         if not name:
-            name = getattr(motion, "display_name", None)
-        if not name:
             raise ValueError("loaded reference motions must expose names for recording")
         names.append(str(name))
     return names

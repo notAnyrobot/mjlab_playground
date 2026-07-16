@@ -156,7 +156,7 @@ def _output_filename_for_motion(motion: Any) -> str:
 
 
 def _motion_identity(motion: Any) -> str:
-    identity = getattr(motion, "name", None) or getattr(motion, "display_name", None)
+    identity = getattr(motion, "name", None)
     if not identity:
         raise ValueError("rich reference motion must expose a name for export")
     return str(identity)

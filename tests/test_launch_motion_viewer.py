@@ -563,6 +563,37 @@ def test_motion_viewer_main_records_headless_batch_without_a_viewer_adapter(
     assert recorder_kwargs["status_reporter"] is not None
 
 
+def test_motion_viewer_main_rejects_display_name_only_recording_identity(
+    tmp_path: Path,
+) -> None:
+    motion_dir = tmp_path / "motions"
+    motion_dir.mkdir()
+    (motion_dir / "walk.npz").write_bytes(b"motion")
+
+    class FakeRecorder:
+        def record(self, motions, request):
+            del motions, request
+            return ()
+
+    with pytest.raises(
+        ValueError,
+        match="loaded reference motions must expose names for recording",
+    ):
+        _launch_motion_viewer.main(
+            [
+                "--motion-files",
+                str(motion_dir),
+                "--headless",
+                "--record-video",
+            ],
+            load_motions=lambda *_, **__: [
+                SimpleNamespace(display_name="legacy display label")
+            ],
+            scene_adapter_builder=lambda *_, **__: FakeSceneAdapter(),
+            deterministic_recorder_factory=lambda *_, **__: FakeRecorder(),
+        )
+
+
 def test_motion_viewer_main_smoke_test_verifies_one_frame_without_interactive_viewer(
     tmp_path: Path,
 ) -> None:

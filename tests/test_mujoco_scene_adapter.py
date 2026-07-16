@@ -21,7 +21,6 @@ def _source_motion(
 ) -> ReferenceMotion:
     fields = {
         "name": "walk_001",
-        "display_name": "Walk 001",
         "fps": 60.0,
         "root_pos": torch.tensor(
             [
@@ -470,7 +469,7 @@ def test_read_robot_state_reads_full_robot_state_after_frame_application() -> No
     adapter = _adapter()
     source_motion = _source_motion()
 
-    adapter.apply_frame(source_motion.frame(1))
+    adapter.apply_frame(source_motion.get_frame(1))
     frame = adapter.read_robot_state()
 
     assert isinstance(frame, ReferenceFrame)

@@ -20,7 +20,7 @@ def _identity_root_rot(num_frames: int) -> torch.Tensor:
 
 
 def _package_reference_motion(*, clip_lengths: list[int] | None = None):
-    from mjlab_playground.motion_lib import ReferenceMotionState
+    from mjlab_playground.motion_lib import ReferenceMotion
 
     lengths = torch.tensor(clip_lengths or [6, 11, 16], dtype=torch.long)
     starts = torch.empty_like(lengths)
@@ -28,7 +28,7 @@ def _package_reference_motion(*, clip_lengths: list[int] | None = None):
     starts[1:] = torch.cumsum(lengths[:-1], dim=0)
     frame_count = int(lengths.sum().item())
     frame_values = torch.arange(frame_count, dtype=torch.float32)
-    return ReferenceMotionState(
+    return ReferenceMotion(
         name="package",
         fps=10.0,
         root_pos=frame_values.unsqueeze(1).repeat(1, 3),
@@ -101,7 +101,7 @@ def test_motion_manager_docs_show_public_usage_and_v1_boundaries() -> None:
     assert not (ROOT / "docs" / "motion_sampler.md").exists()
     text = MANAGER_DOC.read_text(encoding="utf-8")
     required = [
-        "ReferenceMotionState",
+        "ReferenceMotion",
         "clip_starts",
         "clip_lengths",
         "clip_fps",

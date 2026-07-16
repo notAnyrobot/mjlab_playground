@@ -167,8 +167,8 @@ def test_run_motion_lib_exports_rich_motions_to_explicit_output_dir(
     output_dir = tmp_path / "mjlab-astro"
     calls = []
     rich_motions = [
-        SimpleNamespace(name="walk_retargeted.npz", display_name="walk"),
-        SimpleNamespace(name="turn_retargeted", display_name="turn"),
+        SimpleNamespace(name="walk_retargeted.npz"),
+        SimpleNamespace(name="turn_retargeted"),
     ]
 
     class FakeMotionLib:
@@ -256,6 +256,44 @@ def test_run_motion_lib_defaults_output_dir_next_to_source_directory(
     assert result.written_paths == calls
 
 
+def test_run_motion_lib_rejects_display_name_only_export_identity(
+    tmp_path: Path,
+) -> None:
+    run_motion_lib = _load_run_motion_lib_module()
+    motion_path = tmp_path / "walk.npz"
+
+    class FakeMotionLib:
+        def __init__(self, cfg) -> None:
+            del cfg
+
+        def load(self, motion_files: Path):
+            del motion_files
+            return ["source-motion"]
+
+        def resample(self, motion):
+            del motion
+            return "resampled-motion"
+
+        def enrich(self, motion):
+            del motion
+            return SimpleNamespace(display_name="legacy display label")
+
+    class FakeWriter:
+        def write(self, motion, output_path: Path) -> None:
+            del motion, output_path
+
+    with pytest.raises(
+        ValueError,
+        match="rich reference motion must expose a name for export",
+    ):
+        run_motion_lib.run_pipeline(
+            motion_path,
+            motion_lib_cls=FakeMotionLib,
+            motion_lib_cfg_cls=lambda **kwargs: SimpleNamespace(**kwargs),
+            writer_cls=FakeWriter,
+        )
+
+
 def test_run_motion_lib_does_not_guess_pyroki_child_from_split_root(
     tmp_path: Path,
 ) -> None:
@@ -335,7 +373,7 @@ def test_run_motion_lib_outputs_load_and_assemble_as_versioned_clips(
     tmp_path: Path,
 ) -> None:
     run_motion_lib = _load_run_motion_lib_module()
-    from mjlab_playground.motion_lib import ReferenceMotion, ReferenceMotionState
+    from mjlab_playground.motion_lib import ReferenceMotion
     from mjlab_playground.motion_lib.motion_loader import MotionLoader
     from mjlab_playground.motion_lib.reference_motion_npz_writer import (
         ReferenceMotionNpzWriter,
@@ -354,7 +392,7 @@ def test_run_motion_lib_outputs_load_and_assemble_as_versioned_clips(
         def enrich(self, motion):
             offset = 0.0 if motion == "walk" else 10.0
             frame_values = torch.arange(3, dtype=torch.float32) + offset
-            return ReferenceMotionState(
+            return ReferenceMotion(
                 name=f"{motion}.npz",
                 fps=50.0,
                 root_pos=frame_values[:, None].repeat(1, 3),

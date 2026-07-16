@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import tempfile
 from collections.abc import Sequence
@@ -10,10 +11,17 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from ._reference_motion_npz_schema import REFERENCE_MOTION_NPZ_V1
+from ._reference_motion_npz_schema import (
+    REFERENCE_MOTION_NPZ_V1,
+    validate_axis_names,
+    validate_common_clip_fps,
+    validate_compact_clip_names,
+    validate_contiguous_clip_spans,
+    validate_minimum_clip_lengths,
+)
 
 if TYPE_CHECKING:
-    from .motion_loader import ReferenceMotionState
+    from .motion_loader import ReferenceMotion
 
 
 class ReferenceMotionNpzWriter:
@@ -21,7 +29,7 @@ class ReferenceMotionNpzWriter:
 
     def write(
         self,
-        motion: ReferenceMotionState,
+        motion: ReferenceMotion,
         output_path: str | Path,
         *,
         overwrite: bool = False,
@@ -93,7 +101,7 @@ class ReferenceMotionNpzWriter:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
-    def _validate_train_ready(self, motion: ReferenceMotionState) -> None:
+    def _validate_train_ready(self, motion: ReferenceMotion) -> None:
         if motion.foot_contacts is not None:
             raise ValueError(
                 "ReferenceMotionNpzWriter v1 does not serialize source foot_contacts; "
@@ -105,6 +113,11 @@ class ReferenceMotionNpzWriter:
                     "ReferenceMotionNpzWriter requires train-ready rich reference "
                     f"field {field_name}"
                 )
+        fps = float(motion.fps)
+        if not math.isfinite(fps) or fps <= 0.0:
+            raise ValueError("ReferenceMotionNpzWriter fps must be positive and finite")
+        if not fps.is_integer():
+            raise ValueError("ReferenceMotionNpzWriter fps must be integer-valued")
         if motion.dof_names is None:
             raise ValueError(
                 "ReferenceMotionNpzWriter requires dof_names aligned to dof_pos"
@@ -113,32 +126,135 @@ class ReferenceMotionNpzWriter:
             raise ValueError(
                 "ReferenceMotionNpzWriter requires body_names aligned to body tensors"
             )
-        if motion.clip_lengths is None:
-            if motion.root_pos.shape[0] < 3:
-                raise ValueError(
-                    "ReferenceMotionNpzWriter rich clip must contain at least 3 frames"
-                )
-            return
-        short_clip_ids = torch.nonzero(motion.clip_lengths < 3).flatten()
-        if short_clip_ids.numel() > 0:
-            clip_id = int(short_clip_ids[0].item())
-            raise ValueError(
-                f"ReferenceMotionNpzWriter rich clip {clip_id} must contain at least "
-                "3 frames"
-            )
-        assert motion.clip_fps is not None
-        if not torch.equal(
+        self._validate_axis_names(motion)
+        operational_metadata = (
+            motion.clip_starts,
+            motion.clip_lengths,
             motion.clip_fps,
-            torch.full_like(motion.clip_fps, motion.fps),
+            motion.clip_name_bytes,
+            motion.clip_name_offsets,
+        )
+        if any(value is not None for value in operational_metadata) and any(
+            value is None for value in operational_metadata
         ):
             raise ValueError(
-                "ReferenceMotionNpzWriter schema version 1 requires one common FPS"
+                "ReferenceMotionNpzWriter operational clip metadata must be "
+                "provided together"
             )
+        if motion.clip_lengths is None:
+            validate_minimum_clip_lengths(
+                clip_lengths=[motion.root_pos.shape[0]],
+                error_prefix="ReferenceMotionNpzWriter ",
+                include_clip_id=False,
+            )
+            return
+        assert motion.clip_starts is not None
+        assert motion.clip_fps is not None
+        assert motion.clip_name_bytes is not None
+        assert motion.clip_name_offsets is not None
+        if (
+            motion.clip_starts.ndim != 1
+            or motion.clip_lengths.ndim != 1
+            or motion.clip_fps.ndim != 1
+        ):
+            raise ValueError(
+                "ReferenceMotionNpzWriter clip metadata tensors must be 1D"
+            )
+        integer_dtypes = (torch.int8, torch.int16, torch.int32, torch.int64)
+        if (
+            motion.clip_starts.dtype not in integer_dtypes
+            or motion.clip_lengths.dtype not in integer_dtypes
+        ):
+            raise ValueError(
+                "ReferenceMotionNpzWriter clip_starts and clip_lengths must be "
+                "integer tensors"
+            )
+        if not (
+            motion.clip_starts.shape
+            == motion.clip_lengths.shape
+            == motion.clip_fps.shape
+        ):
+            raise ValueError(
+                "ReferenceMotionNpzWriter clip metadata tensors must have matching "
+                "lengths"
+            )
+        if motion.clip_starts.numel() == 0:
+            raise ValueError(
+                "ReferenceMotionNpzWriter clip metadata must contain at least one clip"
+            )
+        packed_frame_count = motion.root_pos.shape[0]
+        validate_contiguous_clip_spans(
+            clip_starts=motion.clip_starts.tolist(),
+            clip_lengths=motion.clip_lengths.tolist(),
+            packed_frame_count=packed_frame_count,
+            error_prefix="ReferenceMotionNpzWriter ",
+        )
+        validate_minimum_clip_lengths(
+            clip_lengths=motion.clip_lengths.tolist(),
+            error_prefix="ReferenceMotionNpzWriter ",
+        )
+        validate_common_clip_fps(
+            clip_fps=motion.clip_fps.tolist(),
+            fps=motion.fps,
+            mismatch_error="schema version 1 requires one common FPS",
+            error_prefix="ReferenceMotionNpzWriter ",
+        )
+        self._validate_clip_names(motion)
+
+    @staticmethod
+    def _validate_axis_names(motion: ReferenceMotion) -> None:
+        for field_name, tensor_field_name in (
+            ("dof_names", "dof_pos"),
+            ("body_names", "body_pos"),
+        ):
+            names = getattr(motion, field_name)
+            tensor = getattr(motion, tensor_field_name)
+            validate_axis_names(
+                field_name=field_name,
+                names=names,
+                expected_count=tensor.shape[1],
+                tensor_field_name=tensor_field_name,
+                error_prefix="ReferenceMotionNpzWriter ",
+            )
+
+    @staticmethod
+    def _validate_clip_names(motion: ReferenceMotion) -> None:
+        assert motion.clip_starts is not None
+        assert motion.clip_name_bytes is not None
+        assert motion.clip_name_offsets is not None
+        encoded_names = motion.clip_name_bytes
+        offsets = motion.clip_name_offsets
+        if (
+            encoded_names.ndim != 1
+            or encoded_names.dtype != torch.uint8
+            or encoded_names.device.type != "cpu"
+        ):
+            raise ValueError(
+                "ReferenceMotionNpzWriter clip_name_bytes must be a 1D uint8 CPU tensor"
+            )
+        integer_dtypes = (torch.int8, torch.int16, torch.int32, torch.int64)
+        if (
+            offsets.ndim != 1
+            or offsets.dtype not in integer_dtypes
+            or offsets.device.type != "cpu"
+        ):
+            raise ValueError(
+                "ReferenceMotionNpzWriter clip_name_offsets must be a 1D integer "
+                "CPU tensor"
+            )
+        offset_values = offsets.tolist()
+        encoded_bytes = bytes(encoded_names.tolist())
+        validate_compact_clip_names(
+            encoded_names=encoded_bytes,
+            offsets=offset_values,
+            clip_count=motion.clip_starts.numel(),
+            error_prefix="ReferenceMotionNpzWriter ",
+        )
 
     @classmethod
     def _clip_metadata(
         cls,
-        motion: ReferenceMotionState,
+        motion: ReferenceMotion,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if motion.clip_starts is None:
             return (
@@ -156,7 +272,7 @@ class ReferenceMotionNpzWriter:
 
     @staticmethod
     def _clip_name_metadata(
-        motion: ReferenceMotionState,
+        motion: ReferenceMotion,
     ) -> tuple[np.ndarray, np.ndarray]:
         if motion.clip_name_bytes is not None:
             assert motion.clip_name_offsets is not None

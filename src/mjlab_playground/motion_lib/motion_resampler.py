@@ -11,7 +11,7 @@ from .math_util import (
     slerp_frame_quaternions_wxyz,
 )
 from .motion_loader import (
-    ReferenceMotionState,
+    ReferenceMotion,
     _validate_integer_fps,
 )
 
@@ -45,7 +45,7 @@ class ReferenceMotionResampler:
     def __init__(self, cfg: MotionResamplingCfg) -> None:
         self.cfg = cfg
 
-    def resample(self, motion: ReferenceMotionState) -> ReferenceMotionState:
+    def resample(self, motion: ReferenceMotion) -> ReferenceMotion:
         self._validate_resampling_request(motion)
 
         frame_positions = self._target_frame_positions(motion)
@@ -53,19 +53,18 @@ class ReferenceMotionResampler:
         root_rot = slerp_frame_quaternions_wxyz(motion.root_rot, frame_positions)
         dof_pos = lerp_frame_values(motion.dof_pos, frame_positions)
 
-        return ReferenceMotionState(
+        return ReferenceMotion(
             root_pos=root_pos,
             root_rot=root_rot,
             dof_pos=dof_pos,
             name=motion.name,
-            display_name=motion.display_name,
             fps=self.cfg.output_fps,
             root_lin_vel=finite_difference_velocity(root_pos, self.cfg.output_fps),
             root_ang_vel=quaternion_angular_velocity_wxyz(root_rot, self.cfg.output_fps),
             dof_vel=finite_difference_velocity(dof_pos, self.cfg.output_fps),
         )
 
-    def _validate_resampling_request(self, motion: ReferenceMotionState) -> None:
+    def _validate_resampling_request(self, motion: ReferenceMotion) -> None:
         if self.cfg.output_fps < motion.fps:
             raise ValueError(
                 "ReferenceMotionResampler v1 does not support downsampling: "
@@ -78,7 +77,7 @@ class ReferenceMotionResampler:
                     f"motions only; got rich field {field_name}"
                 )
 
-    def _target_frame_positions(self, motion: ReferenceMotionState) -> torch.Tensor:
+    def _target_frame_positions(self, motion: ReferenceMotion) -> torch.Tensor:
         duration = (motion.root_pos.shape[0] - 1) / motion.fps
         target_frames = int(round(duration * self.cfg.output_fps)) + 1
         return torch.linspace(

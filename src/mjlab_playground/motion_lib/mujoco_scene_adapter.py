@@ -102,7 +102,7 @@ class MujocoSceneAdapter:
         frame_index: int,
     ) -> None:
         """Apply one frame through the presentation-agnostic scene seam."""
-        self.apply_frame(motion.frame(frame_index))
+        self.apply_frame(motion.get_frame(frame_index))
 
     def apply_frame(self, frame: ReferenceFrame) -> None:
         """Write one reference frame and update the scene."""

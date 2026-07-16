@@ -1,3 +1,5 @@
+"""ReferenceMotion public contract tests."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -28,7 +30,6 @@ def _load_motion_loader_module() -> ModuleType:
 _motion_loader = _load_motion_loader_module()
 ReferenceFrame = _motion_loader.ReferenceFrame
 ReferenceMotion = _motion_loader.ReferenceMotion
-ReferenceMotionState = _motion_loader.ReferenceMotionState
 
 
 def _identity_root_rot(num_frames: int) -> torch.Tensor:
@@ -53,9 +54,7 @@ def _rich_one_clip(
         "root_ang_vel": frame_values[:, None].repeat(1, 3),
         "dof_vel": frame_values[:, None].repeat(1, 2),
         "body_pos": frame_values[:, None, None].repeat(1, 2, 3),
-        "body_rot": torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(
-            frames, 2, 1
-        ),
+        "body_rot": torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(frames, 2, 1),
         "body_lin_vel": frame_values[:, None, None].repeat(1, 2, 3),
         "body_ang_vel": frame_values[:, None, None].repeat(1, 2, 3),
         "body_contacts": torch.arange(frames)[:, None].repeat(1, 2) % 2 == 0,
@@ -66,13 +65,14 @@ def _rich_one_clip(
     return ReferenceMotion(**fields)
 
 
-def test_reference_motion_state_is_compatibility_alias_for_reference_motion() -> None:
+def test_reference_motion_state_is_deprecated_compatibility_alias() -> None:
+    DeprecatedReferenceMotionState = _motion_loader.ReferenceMotionState
     from mjlab_playground.motion_lib import ReferenceMotion as ExportedReferenceMotion
     from mjlab_playground.motion_lib import (
         ReferenceMotionState as ExportedReferenceMotionState,
     )
 
-    assert ReferenceMotionState is ReferenceMotion
+    assert DeprecatedReferenceMotionState is ReferenceMotion
     assert ExportedReferenceMotionState is ExportedReferenceMotion
 
 
@@ -98,30 +98,33 @@ def test_reference_frame_accepts_one_timestep_fields() -> None:
     assert frame.body_contacts.shape == (31,)
 
 
-def test_reference_frame_rejects_invalid_timestep_fields() -> None:
-    with pytest.raises(ValueError, match="root_pos must have shape"):
-        ReferenceFrame(
-            root_pos=torch.zeros(1, 3),
-            root_rot=torch.tensor([1.0, 0.0, 0.0, 0.0]),
-            dof_pos=torch.zeros(29),
-        )
-
-    with pytest.raises(ValueError, match="root_rot quaternions must be normalized"):
-        ReferenceFrame(
-            root_pos=torch.zeros(3),
-            root_rot=torch.ones(4),
-            dof_pos=torch.zeros(29),
-        )
-
-
-def test_reference_motion_state_defaults_to_30_fps_and_preserves_required_tensors() -> (
+def test_reference_frame_direct_construction_preserves_fields_without_validation() -> (
     None
 ):
+    root_pos = torch.tensor([[float("nan")]], dtype=torch.float64)
+    root_rot = torch.ones(2, dtype=torch.int64)
+    dof_pos = torch.zeros(3, dtype=torch.float32)
+    body_contacts = "unvalidated contacts"
+
+    frame = ReferenceFrame(
+        root_pos=root_pos,
+        root_rot=root_rot,
+        dof_pos=dof_pos,
+        body_contacts=body_contacts,
+    )
+
+    assert frame.root_pos is root_pos
+    assert frame.root_rot is root_rot
+    assert frame.dof_pos is dof_pos
+    assert frame.body_contacts is body_contacts
+
+
+def test_reference_motion_defaults_to_30_fps_and_preserves_required_tensors() -> None:
     root_pos = torch.zeros(3, 3)
     root_rot = _identity_root_rot(3)
     dof_pos = torch.zeros(3, 29)
 
-    state = ReferenceMotionState(root_pos=root_pos, root_rot=root_rot, dof_pos=dof_pos)
+    state = ReferenceMotion(root_pos=root_pos, root_rot=root_rot, dof_pos=dof_pos)
 
     assert state.fps == 30.0
     assert state.root_pos is root_pos
@@ -135,8 +138,8 @@ def test_reference_motion_state_defaults_to_30_fps_and_preserves_required_tensor
     assert state.clip_fps is None
 
 
-def test_reference_motion_state_accepts_full_reference_motion_fields() -> None:
-    state = ReferenceMotionState(
+def test_reference_motion_accepts_full_reference_motion_fields() -> None:
+    state = ReferenceMotion(
         fps=50.0,
         root_pos=torch.zeros(4, 3),
         root_rot=_identity_root_rot(4),
@@ -158,7 +161,7 @@ def test_reference_motion_state_accepts_full_reference_motion_fields() -> None:
     assert state.body_contacts.dtype == torch.bool
 
 
-def test_reference_motion_frame_extracts_single_reference_frame() -> None:
+def test_reference_motion_get_frame_extracts_single_reference_frame() -> None:
     motion = ReferenceMotion(
         fps=50.0,
         root_pos=torch.arange(12, dtype=torch.float32).reshape(4, 3),
@@ -180,7 +183,7 @@ def test_reference_motion_frame_extracts_single_reference_frame() -> None:
         clip_fps=torch.tensor([50.0]),
     )
 
-    frame = motion.frame(2)
+    frame = motion.get_frame(2)
 
     assert isinstance(frame, ReferenceFrame)
     torch.testing.assert_close(frame.root_pos, motion.root_pos[2])
@@ -199,7 +202,9 @@ def test_reference_motion_frame_extracts_single_reference_frame() -> None:
 
 
 @pytest.mark.parametrize("frame_index", [-1, 4])
-def test_reference_motion_frame_rejects_out_of_range_indices(frame_index: int) -> None:
+def test_reference_motion_get_frame_rejects_out_of_range_indices(
+    frame_index: int,
+) -> None:
     motion = ReferenceMotion(
         root_pos=torch.zeros(4, 3),
         root_rot=_identity_root_rot(4),
@@ -207,7 +212,25 @@ def test_reference_motion_frame_rejects_out_of_range_indices(frame_index: int) -
     )
 
     with pytest.raises(IndexError, match=f"frame index {frame_index} out of range"):
-        motion.frame(frame_index)
+        motion.get_frame(frame_index)
+
+
+def test_reference_motion_does_not_expose_old_frame_method() -> None:
+    assert not hasattr(ReferenceMotion, "frame")
+
+
+def test_reference_motion_does_not_accept_or_expose_display_name() -> None:
+    fields = {
+        "root_pos": torch.zeros(3, 3),
+        "root_rot": _identity_root_rot(3),
+        "dof_pos": torch.zeros(3, 2),
+    }
+
+    motion = ReferenceMotion(**fields)
+
+    assert not hasattr(motion, "display_name")
+    with pytest.raises(TypeError, match="unexpected keyword argument 'display_name'"):
+        ReferenceMotion(**fields, display_name="walk")
 
 
 def test_reference_motion_from_frames_reconstructs_tensor_backed_motion() -> None:
@@ -245,7 +268,6 @@ def test_reference_motion_from_frames_reconstructs_tensor_backed_motion() -> Non
     motion = ReferenceMotion.from_frames(
         frames,
         name="walk.npz",
-        display_name="walk",
         fps=60.0,
         clip_starts=torch.tensor([0]),
         clip_lengths=torch.tensor([2]),
@@ -253,7 +275,7 @@ def test_reference_motion_from_frames_reconstructs_tensor_backed_motion() -> Non
     )
 
     assert motion.name == "walk.npz"
-    assert motion.display_name == "walk"
+    assert not hasattr(motion, "display_name")
     assert motion.fps == 60.0
     torch.testing.assert_close(
         motion.root_pos, torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
@@ -351,6 +373,72 @@ def test_reference_motion_from_clips_accepts_one_rich_clip() -> None:
     torch.testing.assert_close(assembled.root_pos, clip.root_pos)
 
 
+def test_reference_motion_from_clips_delegates_dtype_handling_to_torch_cat() -> None:
+    first = _rich_one_clip(name="walk.npz")
+    second = _rich_one_clip(name="turn.npz", value_offset=10.0)
+    float_fields = (
+        "root_pos",
+        "root_rot",
+        "dof_pos",
+        "root_lin_vel",
+        "root_ang_vel",
+        "dof_vel",
+        "body_pos",
+        "body_rot",
+        "body_lin_vel",
+        "body_ang_vel",
+    )
+    second = dataclasses.replace(
+        second,
+        **{
+            field_name: getattr(second, field_name).to(torch.float64)
+            for field_name in float_fields
+        },
+    )
+
+    assembled = ReferenceMotion.from_clips([first, second])
+
+    assert assembled.root_pos.dtype == torch.float64
+    torch.testing.assert_close(
+        assembled.root_pos,
+        torch.cat([first.root_pos, second.root_pos]),
+    )
+
+
+def test_reference_motion_from_clips_does_not_revalidate_quaternion_values() -> None:
+    first = _rich_one_clip(name="walk.npz")
+    second = dataclasses.replace(
+        _rich_one_clip(name="turn.npz", value_offset=10.0),
+        root_rot=torch.full((3, 4), 2.0),
+        body_rot=torch.full((3, 2, 4), 3.0),
+    )
+
+    assembled = ReferenceMotion.from_clips([first, second])
+
+    torch.testing.assert_close(
+        assembled.root_rot,
+        torch.cat([first.root_rot, second.root_rot]),
+    )
+    torch.testing.assert_close(
+        assembled.body_rot,
+        torch.cat([first.body_rot, second.body_rot]),
+    )
+
+
+def test_reference_motion_from_clips_does_not_scan_tensor_finiteness() -> None:
+    first = _rich_one_clip(name="walk.npz")
+    second_root_lin_vel = torch.zeros(3, 3)
+    second_root_lin_vel[1, 0] = float("nan")
+    second = dataclasses.replace(
+        _rich_one_clip(name="turn.npz", value_offset=10.0),
+        root_lin_vel=second_root_lin_vel,
+    )
+
+    assembled = ReferenceMotion.from_clips([first, second])
+
+    assert torch.isnan(assembled.root_lin_vel[4, 0])
+
+
 def test_reference_motion_from_clips_rejects_empty_input() -> None:
     with pytest.raises(ValueError, match="requires at least one clip"):
         ReferenceMotion.from_clips([])
@@ -369,18 +457,75 @@ def test_reference_motion_from_clips_rejects_already_multi_clip_input() -> None:
 
 
 @pytest.mark.parametrize(
+    ("metadata", "message"),
+    [
+        pytest.param(
+            {"clip_starts": torch.tensor([0])},
+            "operational clip metadata must be provided together",
+            id="partial",
+        ),
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([1]),
+                "clip_lengths": torch.tensor([3]),
+                "clip_fps": torch.tensor([50.0]),
+            },
+            "clip_starts must describe one clip starting at frame 0",
+            id="start",
+        ),
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([0]),
+                "clip_lengths": torch.tensor([2]),
+                "clip_fps": torch.tensor([50.0]),
+            },
+            "clip_lengths must match packed frame count 3",
+            id="length",
+        ),
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([0]),
+                "clip_lengths": torch.tensor([3]),
+                "clip_fps": torch.tensor([60.0]),
+            },
+            "clip_fps must match fps 50.0",
+            id="fps",
+        ),
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([0]),
+                "clip_lengths": torch.tensor([3]),
+                "clip_fps": torch.tensor([50.0]),
+                "clip_name_offsets": torch.tensor([0, 3]),
+            },
+            "clip_name_offsets must span clip_name_bytes",
+            id="name-span",
+        ),
+    ],
+)
+def test_reference_motion_from_clips_rejects_incoherent_operational_metadata(
+    metadata: dict[str, torch.Tensor],
+    message: str,
+) -> None:
+    encoded_name = torch.tensor(list(b"walk.npz"), dtype=torch.uint8)
+    fields = {
+        "clip_name_bytes": encoded_name,
+        "clip_name_offsets": torch.tensor([0, encoded_name.numel()]),
+    }
+    fields.update(metadata)
+    clip = dataclasses.replace(_rich_one_clip(name="package.npz"), **fields)
+
+    with pytest.raises(ValueError, match=rf"clip 0.*{message}"):
+        ReferenceMotion.from_clips([clip])
+
+
+@pytest.mark.parametrize(
     ("mismatch", "message"),
     [
         ("fps", "fps"),
-        ("dtype", "dtype"),
-        ("dof_count", "DOF count"),
-        ("body_count", "body count"),
         ("dof_names", "dof_names"),
         ("body_names", "body_names"),
         ("body_contacts", "body_contacts presence"),
-        ("body_contacts_dtype", "body_contacts dtype"),
-        ("root_rot", "root_rot quaternions"),
-        ("body_rot", "body_rot quaternions"),
     ],
 )
 def test_reference_motion_from_clips_identifies_incompatible_clip(
@@ -391,58 +536,12 @@ def test_reference_motion_from_clips_identifies_incompatible_clip(
     second = _rich_one_clip(name="turn.npz", value_offset=10.0)
     if mismatch == "fps":
         second = dataclasses.replace(second, fps=60.0)
-    elif mismatch == "dtype":
-        second = dataclasses.replace(
-            second,
-            **{
-                field_name: getattr(second, field_name).to(torch.float64)
-                for field_name in (
-                    "root_pos",
-                    "root_rot",
-                    "dof_pos",
-                    "root_lin_vel",
-                    "root_ang_vel",
-                    "dof_vel",
-                    "body_pos",
-                    "body_rot",
-                    "body_lin_vel",
-                    "body_ang_vel",
-                )
-            },
-        )
-    elif mismatch == "dof_count":
-        second = dataclasses.replace(
-            second,
-            dof_pos=torch.zeros(3, 3),
-            dof_vel=torch.zeros(3, 3),
-            dof_names=("left_hip", "right_hip", "waist"),
-        )
-    elif mismatch == "body_count":
-        second = dataclasses.replace(
-            second,
-            body_pos=torch.zeros(3, 3, 3),
-            body_rot=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).repeat(3, 3, 1),
-            body_lin_vel=torch.zeros(3, 3, 3),
-            body_ang_vel=torch.zeros(3, 3, 3),
-            body_contacts=torch.zeros(3, 3, dtype=torch.bool),
-            body_names=("pelvis", "torso", "foot"),
-        )
     elif mismatch == "dof_names":
-        second = dataclasses.replace(
-            second, dof_names=("right_hip", "left_hip")
-        )
+        second = dataclasses.replace(second, dof_names=("right_hip", "left_hip"))
     elif mismatch == "body_names":
         second = dataclasses.replace(second, body_names=("torso", "pelvis"))
     elif mismatch == "body_contacts":
         second = dataclasses.replace(second, body_contacts=None)
-    elif mismatch == "body_contacts_dtype":
-        second = dataclasses.replace(
-            second, body_contacts=second.body_contacts.to(torch.float32)
-        )
-    elif mismatch == "root_rot":
-        object.__setattr__(second, "root_rot", second.root_rot * 2.0)
-    elif mismatch == "body_rot":
-        object.__setattr__(second, "body_rot", second.body_rot * 2.0)
     else:  # pragma: no cover - keeps the test table exhaustive
         raise AssertionError(f"unknown mismatch {mismatch}")
 
@@ -476,35 +575,16 @@ def test_reference_motion_from_clips_identifies_missing_rich_field(
         ReferenceMotion.from_clips([first, second])
 
 
-@pytest.mark.parametrize(
-    "field_name",
-    [
-        "root_pos",
-        "root_rot",
-        "dof_pos",
-        "root_lin_vel",
-        "root_ang_vel",
-        "dof_vel",
-        "body_pos",
-        "body_rot",
-        "body_lin_vel",
-        "body_ang_vel",
-    ],
-)
-def test_reference_motion_from_clips_identifies_malformed_rich_field_shape(
-    field_name: str,
-) -> None:
+def test_reference_motion_from_clips_delegates_shape_incompatibility_to_torch_cat() -> (
+    None
+):
     first = _rich_one_clip(name="walk.npz")
-    second = _rich_one_clip(name="turn.npz", value_offset=10.0)
-    malformed = (
-        torch.zeros(3, 4)
-        if field_name == "root_pos"
-        else getattr(second, field_name)[:-1]
+    second = dataclasses.replace(
+        _rich_one_clip(name="turn.npz", value_offset=10.0),
+        root_pos=torch.zeros(3, 4),
     )
-    object.__setattr__(second, field_name, malformed)
-    mismatch = "shape" if field_name == "root_pos" else "frame count"
 
-    with pytest.raises(ValueError, match=rf"clip 1.*{field_name}.*{mismatch}"):
+    with pytest.raises(RuntimeError, match="Sizes of tensors must match"):
         ReferenceMotion.from_clips([first, second])
 
 
@@ -527,15 +607,8 @@ def test_reference_motion_from_clips_identifies_short_rich_clip() -> None:
         ReferenceMotion.from_clips([first, second])
 
 
-def test_reference_motion_from_clips_rejects_selected_device_mismatch() -> None:
-    clip = _rich_one_clip(name="walk.npz")
-
-    with pytest.raises(ValueError, match="clip 0.*device"):
-        ReferenceMotion.from_clips([clip], device="cuda")
-
-
-def test_reference_motion_state_accepts_valid_multi_clip_package_metadata() -> None:
-    state = ReferenceMotionState(
+def test_reference_motion_accepts_valid_multi_clip_package_metadata() -> None:
+    state = ReferenceMotion(
         fps=50.0,
         root_pos=torch.zeros(9, 3),
         root_rot=_identity_root_rot(9),
@@ -575,23 +648,13 @@ def test_reference_motion_exposes_axis_names_and_lazy_utf8_clip_identity() -> No
     assert motion.clip_name(0) == clip_name
 
 
-def test_reference_motion_rejects_axis_names_that_are_not_valid_utf8() -> None:
-    with pytest.raises(ValueError, match="dof_names must contain valid UTF-8"):
-        ReferenceMotion(
-            root_pos=torch.zeros(3, 3),
-            root_rot=_identity_root_rot(3),
-            dof_pos=torch.zeros(3, 2),
-            dof_names=(chr(0xD800), "right_hip"),
-        )
-
-
-def test_reference_motion_state_accepts_source_foot_contacts() -> None:
+def test_reference_motion_accepts_source_foot_contacts() -> None:
     foot_contacts = torch.tensor(
         [[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]],
         dtype=torch.float32,
     )
 
-    state = ReferenceMotionState(
+    state = ReferenceMotion(
         root_pos=torch.zeros(3, 3),
         root_rot=_identity_root_rot(3),
         dof_pos=torch.zeros(3, 29),
@@ -601,170 +664,11 @@ def test_reference_motion_state_accepts_source_foot_contacts() -> None:
     assert state.foot_contacts is foot_contacts
 
 
-def test_reference_motion_state_rejects_bad_source_foot_contacts() -> None:
-    with pytest.raises(ValueError, match=r"foot_contacts must have shape \(T, 2\)"):
-        ReferenceMotionState(
-            root_pos=torch.zeros(3, 3),
-            root_rot=_identity_root_rot(3),
-            dof_pos=torch.zeros(3, 29),
-            foot_contacts=torch.zeros(3, 3),
-        )
-
-    with pytest.raises(ValueError, match="foot_contacts must share frame count"):
-        ReferenceMotionState(
-            root_pos=torch.zeros(3, 3),
-            root_rot=_identity_root_rot(3),
-            dof_pos=torch.zeros(3, 29),
-            foot_contacts=torch.zeros(4, 2),
-        )
-
-    with pytest.raises(ValueError, match="foot_contacts contains non-finite values"):
-        ReferenceMotionState(
-            root_pos=torch.zeros(3, 3),
-            root_rot=_identity_root_rot(3),
-            dof_pos=torch.zeros(3, 29),
-            foot_contacts=torch.tensor([[1.0, 0.0], [float("nan"), 0.5], [0.0, 1.0]]),
-        )
-
-
-@pytest.mark.parametrize("fps", [0.0, -30.0, float("inf"), float("nan")])
-def test_reference_motion_state_rejects_non_positive_or_non_finite_fps(
-    fps: float,
-) -> None:
-    with pytest.raises(ValueError, match="fps must be positive and finite"):
-        ReferenceMotionState(
-            fps=fps,
-            root_pos=torch.zeros(3, 3),
-            root_rot=_identity_root_rot(3),
-            dof_pos=torch.zeros(3, 29),
-        )
-
-
-def test_reference_motion_state_rejects_non_integer_fps() -> None:
-    with pytest.raises(ValueError, match="fps must be integer-valued"):
-        ReferenceMotionState(
-            fps=29.97,
-            root_pos=torch.zeros(3, 3),
-            root_rot=_identity_root_rot(3),
-            dof_pos=torch.zeros(3, 29),
-        )
-
-
-@pytest.mark.parametrize(
-    ("metadata", "match"),
-    [
-        (
-            {
-                "clip_starts": torch.tensor([0, 3]),
-                "clip_lengths": torch.tensor([3, 2]),
-                "clip_fps": torch.tensor([30.0, 30.0]),
-            },
-            "clip spans must cover",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([0, 2]),
-                "clip_lengths": torch.tensor([3, 3]),
-                "clip_fps": torch.tensor([30.0, 30.0]),
-            },
-            "clip spans must be contiguous",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([0, -3]),
-                "clip_lengths": torch.tensor([3, 3]),
-                "clip_fps": torch.tensor([30.0, 30.0]),
-            },
-            "clip_starts must be non-negative",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([0, 3]),
-                "clip_lengths": torch.tensor([3, 0]),
-                "clip_fps": torch.tensor([30.0, 30.0]),
-            },
-            "clip_lengths must be positive",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([0, 3]),
-                "clip_lengths": torch.tensor([3, 3]),
-                "clip_fps": torch.tensor([30.0, 0.0]),
-            },
-            "clip_fps must be positive and finite",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([0, 3]),
-                "clip_lengths": torch.tensor([3, 3]),
-                "clip_fps": torch.tensor([30.0, float("inf")]),
-            },
-            "clip_fps must be positive and finite",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([0, 3]),
-                "clip_lengths": torch.tensor([3, 3]),
-                "clip_fps": torch.tensor([30.0, 29.97]),
-            },
-            "clip_fps must be integer-valued",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([0, 3]),
-                "clip_lengths": torch.tensor([3, 3]),
-                "clip_fps": torch.tensor([30.0, 60.0]),
-            },
-            "clip_fps must match fps",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([False, True]),
-                "clip_lengths": torch.tensor([3, 3]),
-                "clip_fps": torch.tensor([30.0, 30.0]),
-            },
-            "clip_starts must be an integer tensor",
-        ),
-        (
-            {
-                "clip_starts": torch.tensor([0, 3]),
-                "clip_lengths": torch.tensor([True, True]),
-                "clip_fps": torch.tensor([30.0, 30.0]),
-            },
-            "clip_lengths must be an integer tensor",
-        ),
-    ],
-)
-def test_reference_motion_state_rejects_invalid_package_metadata(
-    metadata: dict[str, torch.Tensor],
-    match: str,
-) -> None:
-    with pytest.raises((TypeError, ValueError), match=match):
-        ReferenceMotionState(
-            fps=30.0,
-            root_pos=torch.zeros(6, 3),
-            root_rot=_identity_root_rot(6),
-            dof_pos=torch.zeros(6, 29),
-            **metadata,
-        )
-
-
-def test_reference_motion_state_rejects_incomplete_package_metadata() -> None:
-    with pytest.raises(ValueError, match="must be provided together"):
-        ReferenceMotionState(
-            fps=30.0,
-            root_pos=torch.zeros(6, 3),
-            root_rot=_identity_root_rot(6),
-            dof_pos=torch.zeros(6, 29),
-            clip_starts=torch.tensor([0, 3]),
-        )
-
-
 @pytest.mark.parametrize("num_frames", [1, 2])
-def test_reference_motion_state_accepts_small_sampled_batches_without_package_metadata(
+def test_reference_motion_accepts_small_sampled_batches_without_package_metadata(
     num_frames: int,
 ) -> None:
-    state = ReferenceMotionState(
+    state = ReferenceMotion(
         root_pos=torch.zeros(num_frames, 3),
         root_rot=_identity_root_rot(num_frames),
         dof_pos=torch.zeros(num_frames, 29),
@@ -776,40 +680,46 @@ def test_reference_motion_state_accepts_small_sampled_batches_without_package_me
     assert state.clip_fps is None
 
 
-def test_reference_motion_state_rejects_shape_dtype_device_and_finite_mismatches() -> (
+def test_reference_motion_direct_construction_preserves_fields_without_validation() -> (
     None
 ):
-    with pytest.raises(ValueError, match="root_pos must have shape"):
-        ReferenceMotionState(
-            root_pos=torch.zeros(3, 4),
-            root_rot=_identity_root_rot(3),
-            dof_pos=torch.zeros(3, 29),
-        )
+    root_pos = torch.tensor([float("nan")], dtype=torch.float64)
+    root_rot = torch.ones(2, dtype=torch.int64)
+    dof_pos = torch.zeros(3, 7, dtype=torch.float32)
+    clip_starts = torch.tensor([99.5])
+    dof_names = (chr(0xD800),)
 
-    with pytest.raises(ValueError, match="dof_pos must share dtype"):
-        ReferenceMotionState(
-            root_pos=torch.zeros(3, 3, dtype=torch.float32),
-            root_rot=_identity_root_rot(3).to(torch.float32),
-            dof_pos=torch.zeros(3, 29, dtype=torch.float64),
-        )
+    motion = ReferenceMotion(
+        root_pos=root_pos,
+        root_rot=root_rot,
+        dof_pos=dof_pos,
+        fps=-29.97,
+        clip_starts=clip_starts,
+        dof_names=dof_names,
+    )
 
-    root_pos = torch.zeros(3, 3)
-    root_pos[1, 0] = float("nan")
-    with pytest.raises(ValueError, match="root_pos contains non-finite values"):
-        ReferenceMotionState(
-            root_pos=root_pos,
-            root_rot=_identity_root_rot(3),
-            dof_pos=torch.zeros(3, 29),
-        )
+    assert motion.root_pos is root_pos
+    assert motion.root_rot is root_rot
+    assert motion.dof_pos is dof_pos
+    assert motion.fps == -29.97
+    assert motion.clip_starts is clip_starts
+    assert motion.dof_names is dof_names
 
 
-def test_reference_motion_state_rejects_unnormalized_root_rotation() -> None:
-    with pytest.raises(ValueError, match="root_rot quaternions must be normalized"):
-        ReferenceMotionState(
-            root_pos=torch.zeros(3, 3),
-            root_rot=torch.ones(3, 4),
-            dof_pos=torch.zeros(3, 29),
-        )
+@pytest.mark.parametrize("value_class", [ReferenceFrame, ReferenceMotion])
+def test_reference_values_remain_frozen_and_keyword_only(value_class: type) -> None:
+    values = (
+        torch.zeros(3),
+        torch.ones(4),
+        torch.zeros(2),
+    )
+
+    with pytest.raises(TypeError):
+        value_class(*values)
+
+    value = value_class(root_pos=values[0], root_rot=values[1], dof_pos=values[2])
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        value.root_pos = torch.ones(3)
 
 
 def test_motion_state_alias_is_not_exported_from_module_file() -> None:

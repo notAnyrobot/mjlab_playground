@@ -6,7 +6,7 @@ from typing import Literal
 
 import torch
 
-from .motion_loader import ReferenceMotionState
+from .motion_loader import ReferenceMotion
 
 ClipWeighting = Literal["uniform", "duration", "explicit"]
 TimeSampling = Literal["start", "uniform", "adaptive"]
@@ -56,7 +56,7 @@ class MotionManager:
 
     def __init__(
         self,
-        motion: ReferenceMotionState,
+        motion: ReferenceMotion,
         cfg: MotionManagerCfg | None = None,
     ) -> None:
         self.cfg = cfg or MotionManagerCfg()
@@ -181,7 +181,7 @@ class MotionManager:
 
     @staticmethod
     def _package_clip_metadata(
-        motion: ReferenceMotionState,
+        motion: ReferenceMotion,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if (
             motion.clip_starts is None
@@ -217,7 +217,7 @@ class MimicMotionManager(MotionManager):
 
     def __init__(
         self,
-        motion: ReferenceMotionState,
+        motion: ReferenceMotion,
         num_envs: int,
         cfg: MotionManagerCfg | None = None,
     ) -> None:

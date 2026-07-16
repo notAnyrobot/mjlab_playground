@@ -926,6 +926,7 @@ def test_deterministic_recorder_reports_failure_context_and_removes_partial_outp
 ) -> None:
     motion = SimpleNamespace(
         name="walk.npz",
+        display_name="legacy display label",
         fps=30.0,
         root_pos=np.zeros((2, 3)),
     )

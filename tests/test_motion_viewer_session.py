@@ -309,6 +309,7 @@ def test_first_interrupt_stops_presentation_and_second_interrupt_cancels_wait(
 
 def test_run_applies_initial_frame_and_returns_immutable_snapshot() -> None:
     motion = FakeReferenceMotion(name="walk", frame_count=4, fps=2.0)
+    motion.display_name = "legacy display label"
     scene = InMemoryMotionScene()
     adapter = ScriptedViewerAdapter([ViewerTick(elapsed_seconds=0.0)])
     viewer = MotionViewer(
