@@ -12,7 +12,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from mjlab_playground.motion_lib import ReferenceMotionState  # noqa: E402
+from mjlab_playground.motion_lib import ReferenceMotion  # noqa: E402
 from mjlab_playground.motion_lib.motion_resampler import (  # noqa: E402
     MotionResamplingCfg,
     ReferenceMotionResampler,
@@ -27,10 +27,9 @@ def _z_quat(degrees: float, *, dtype: torch.dtype = torch.float32) -> torch.Tens
     )
 
 
-def _source_motion(*, fps: float = 30.0, dtype: torch.dtype = torch.float32) -> ReferenceMotionState:
-    return ReferenceMotionState(
+def _source_motion(*, fps: float = 30.0, dtype: torch.dtype = torch.float32) -> ReferenceMotion:
+    return ReferenceMotion(
         name="motion.npz",
-        display_name="motion",
         fps=fps,
         root_pos=torch.tensor(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
@@ -60,7 +59,7 @@ def test_reference_motion_resampler_upsamples_coordinates_and_velocities() -> No
 
     assert result is not motion
     assert result.name == "motion.npz"
-    assert result.display_name == "motion"
+    assert not hasattr(result, "display_name")
     assert result.fps == 60.0
     assert result.root_pos.dtype == torch.float64
     assert result.root_pos.device == motion.root_pos.device
@@ -111,7 +110,7 @@ def test_reference_motion_resampler_rejects_downsampling() -> None:
 
 
 def test_reference_motion_resampler_slerp_uses_shortest_quaternion_path() -> None:
-    motion = ReferenceMotionState(
+    motion = ReferenceMotion(
         fps=30.0,
         root_pos=torch.zeros(3, 3),
         root_rot=torch.stack([_z_quat(0.0), -_z_quat(90.0), _z_quat(180.0)]),
@@ -124,7 +123,7 @@ def test_reference_motion_resampler_slerp_uses_shortest_quaternion_path() -> Non
 
 
 def test_reference_motion_resampler_rejects_rich_reference_fields() -> None:
-    motion = ReferenceMotionState(
+    motion = ReferenceMotion(
         fps=30.0,
         root_pos=torch.zeros(3, 3),
         root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
@@ -137,7 +136,7 @@ def test_reference_motion_resampler_rejects_rich_reference_fields() -> None:
 
 
 def test_reference_motion_resampler_rejects_unresampled_foot_contacts() -> None:
-    motion = ReferenceMotionState(
+    motion = ReferenceMotion(
         fps=30.0,
         root_pos=torch.zeros(3, 3),
         root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
@@ -150,7 +149,7 @@ def test_reference_motion_resampler_rejects_unresampled_foot_contacts() -> None:
 
 
 def test_reference_motion_resampler_ignores_existing_velocity_fields() -> None:
-    motion = ReferenceMotionState(
+    motion = ReferenceMotion(
         fps=30.0,
         root_pos=torch.zeros(3, 3),
         root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),

@@ -19,12 +19,11 @@ def _identity_quat(frames: int, bodies: int | None = None) -> torch.Tensor:
 
 
 def _rich_reference_motion(**overrides):
-    from mjlab_playground.motion_lib import ReferenceMotionState
+    from mjlab_playground.motion_lib import ReferenceMotion
 
     frames = 3
     fields = {
         "name": "walk_retargeted.npz",
-        "display_name": "walk_retargeted",
         "fps": 50.0,
         "root_pos": torch.tensor(
             [[0.0, 0.1, 0.2], [1.0, 1.1, 1.2], [2.0, 2.1, 2.2]],
@@ -76,7 +75,20 @@ def _rich_reference_motion(**overrides):
         ),
     }
     fields.update(overrides)
-    return ReferenceMotionState(**fields)
+    return ReferenceMotion(**fields)
+
+
+def _rich_reference_motion_with_explicit_metadata(**overrides):
+    encoded_name = b"walk.npz"
+    fields = {
+        "clip_starts": torch.tensor([0]),
+        "clip_lengths": torch.tensor([3]),
+        "clip_fps": torch.tensor([50.0]),
+        "clip_name_bytes": torch.tensor(list(encoded_name), dtype=torch.uint8),
+        "clip_name_offsets": torch.tensor([0, len(encoded_name)]),
+    }
+    fields.update(overrides)
+    return dataclasses.replace(_rich_reference_motion(), **fields)
 
 
 def test_reference_motion_npz_writer_writes_train_ready_tensor_payload(
@@ -144,6 +156,34 @@ def test_reference_motion_npz_writer_writes_train_ready_tensor_payload(
         )
 
 
+def test_reference_motion_npz_writer_does_not_scan_passive_tensor_representation(
+    tmp_path: Path,
+) -> None:
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    root_lin_vel = torch.zeros(3, 3, dtype=torch.float64)
+    root_lin_vel[1, 0] = float("nan")
+    motion = _rich_reference_motion(
+        root_pos=torch.zeros(3, 3, dtype=torch.float64),
+        root_rot=torch.full((3, 4), 2.0),
+        root_lin_vel=root_lin_vel,
+        root_ang_vel=torch.zeros(3, 4),
+        body_rot=torch.full((3, 2, 4), 3.0),
+    )
+    output_path = tmp_path / "passive-values.npz"
+
+    ReferenceMotionNpzWriter().write(motion, output_path)
+
+    with np.load(output_path, allow_pickle=False) as exported:
+        assert exported["root_pos"].dtype == np.float64
+        assert np.isnan(exported["root_lin_vel"][1, 0])
+        assert exported["root_ang_vel"].shape == (3, 4)
+        np.testing.assert_array_equal(exported["root_rot"], np.full((3, 4), 2.0))
+        np.testing.assert_array_equal(exported["body_rot"], np.full((3, 2, 4), 3.0))
+
+
 def test_versioned_single_clip_round_trips_through_public_writer_and_loader(
     tmp_path: Path,
 ) -> None:
@@ -171,6 +211,7 @@ def test_versioned_single_clip_round_trips_through_public_writer_and_loader(
 
     assert len(loaded_collection) == 1
     loaded = loaded_collection[0]
+    assert loaded.name == output_path.name
     assert loaded.fps == 50.0
     torch.testing.assert_close(loaded.clip_starts, torch.tensor([0]))
     torch.testing.assert_close(loaded.clip_lengths, torch.tensor([3]))
@@ -178,6 +219,8 @@ def test_versioned_single_clip_round_trips_through_public_writer_and_loader(
     assert loaded.clip_name(0) == "walking-测试.npz"
     assert loaded.dof_names == ("left_hip", "right_hip")
     assert loaded.body_names == ("pelvis", "torso")
+    assert loaded.dof_pos.shape[1] == len(loaded.dof_names)
+    assert loaded.body_pos.shape[1] == len(loaded.body_names)
     assert loaded.root_pos.device.type == "cpu"
     assert loaded.clip_name_bytes.device.type == "cpu"
     for field_name in (
@@ -251,7 +294,9 @@ def test_versioned_multi_clip_package_round_trips_through_writer_and_loader(
 
     assert len(loaded_collection) == 1
     loaded = loaded_collection[0]
+    assert loaded.name == output_path.name
     assert loaded.fps == 50.0
+    assert loaded.root_pos.shape[0] == 7
     torch.testing.assert_close(loaded.clip_starts, torch.tensor([0, 3]))
     torch.testing.assert_close(loaded.clip_lengths, torch.tensor([3, 4]))
     torch.testing.assert_close(loaded.clip_fps, torch.tensor([50.0, 50.0]))
@@ -725,6 +770,246 @@ def test_reference_motion_npz_writer_requires_axis_names(
 
     with pytest.raises(ValueError, match=field_name):
         ReferenceMotionNpzWriter().write(motion, tmp_path / "walk.npz")
+
+
+def test_reference_motion_npz_writer_rejects_partial_operational_clip_metadata(
+    tmp_path: Path,
+) -> None:
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    motion = dataclasses.replace(
+        _rich_reference_motion(),
+        clip_starts=torch.tensor([0]),
+    )
+    output_path = tmp_path / "walk.npz"
+
+    with pytest.raises(
+        ValueError,
+        match="operational clip metadata must be provided together",
+    ):
+        ReferenceMotionNpzWriter().write(motion, output_path)
+
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_error"),
+    [
+        pytest.param(
+            {"clip_starts": torch.tensor([1])},
+            "clip spans must start at frame 0",
+            id="first-start",
+        ),
+        pytest.param(
+            {"clip_lengths": torch.tensor([4])},
+            "clip spans must cover packed frame count 3, got 4",
+            id="packed-frame-coverage",
+        ),
+        pytest.param(
+            {"clip_fps": torch.tensor([60.0])},
+            "schema version 1 requires one common FPS",
+            id="common-fps",
+        ),
+        pytest.param(
+            {"clip_starts": torch.tensor([0, 3])},
+            "clip metadata tensors must have matching lengths",
+            id="metadata-count",
+        ),
+    ],
+)
+def test_reference_motion_npz_writer_rejects_incoherent_clip_spans_and_fps(
+    tmp_path: Path,
+    metadata: dict[str, torch.Tensor],
+    expected_error: str,
+) -> None:
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    motion = _rich_reference_motion_with_explicit_metadata(**metadata)
+    output_path = tmp_path / "walk.npz"
+
+    with pytest.raises(ValueError, match=expected_error):
+        ReferenceMotionNpzWriter().write(motion, output_path)
+
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("fps", "expected_error"),
+    [
+        pytest.param(0.0, "fps must be positive and finite", id="zero"),
+        pytest.param(float("inf"), "fps must be positive and finite", id="infinite"),
+        pytest.param(29.97, "fps must be integer-valued", id="fractional"),
+    ],
+)
+def test_reference_motion_npz_writer_rejects_invalid_common_fps(
+    tmp_path: Path,
+    fps: float,
+    expected_error: str,
+) -> None:
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    motion = dataclasses.replace(_rich_reference_motion(), fps=fps)
+    output_path = tmp_path / "walk.npz"
+
+    with pytest.raises(ValueError, match=expected_error):
+        ReferenceMotionNpzWriter().write(motion, output_path)
+
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_error"),
+    [
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([[0]]),
+                "clip_lengths": torch.tensor([[3]]),
+                "clip_fps": torch.tensor([[50.0]]),
+            },
+            "clip metadata tensors must be 1D",
+            id="rank",
+        ),
+        pytest.param(
+            {"clip_lengths": torch.tensor([3.5])},
+            "clip_starts and clip_lengths must be integer tensors",
+            id="integer-spans",
+        ),
+    ],
+)
+def test_reference_motion_npz_writer_rejects_noncanonical_clip_span_metadata(
+    tmp_path: Path,
+    metadata: dict[str, torch.Tensor],
+    expected_error: str,
+) -> None:
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    motion = _rich_reference_motion_with_explicit_metadata(**metadata)
+    output_path = tmp_path / "walk.npz"
+
+    with pytest.raises(ValueError, match=expected_error):
+        ReferenceMotionNpzWriter().write(motion, output_path)
+
+    assert not output_path.exists()
+
+
+def test_reference_motion_npz_writer_rejects_noncontiguous_multi_clip_spans(
+    tmp_path: Path,
+) -> None:
+    from mjlab_playground.motion_lib import ReferenceMotion
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    package = ReferenceMotion.from_clips(
+        [
+            _rich_reference_motion(name="walk.npz"),
+            _rich_reference_motion(name="turn.npz"),
+        ]
+    )
+    package = dataclasses.replace(package, clip_starts=torch.tensor([0, 2]))
+    output_path = tmp_path / "package.npz"
+
+    with pytest.raises(ValueError, match="clip spans must be contiguous"):
+        ReferenceMotionNpzWriter().write(package, output_path)
+
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_error"),
+    [
+        pytest.param(
+            {"clip_name_offsets": torch.tensor([0])},
+            "clip_name_offsets must contain one more entry than the clip count",
+            id="offset-count",
+        ),
+        pytest.param(
+            {"clip_name_offsets": torch.tensor([0, 7])},
+            "clip_name_offsets must span clip_name_bytes length 8, got end 7",
+            id="byte-span",
+        ),
+        pytest.param(
+            {
+                "clip_name_bytes": torch.tensor([0xFF], dtype=torch.uint8),
+                "clip_name_offsets": torch.tensor([0, 1]),
+            },
+            "clip 0 name is not valid UTF-8",
+            id="utf8",
+        ),
+        pytest.param(
+            {"clip_name_bytes": torch.tensor(list(b"walk.npz"))},
+            "clip_name_bytes must be a 1D uint8 CPU tensor",
+            id="compact-bytes",
+        ),
+    ],
+)
+def test_reference_motion_npz_writer_rejects_incoherent_clip_identity_metadata(
+    tmp_path: Path,
+    metadata: dict[str, torch.Tensor],
+    expected_error: str,
+) -> None:
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    motion = _rich_reference_motion_with_explicit_metadata(**metadata)
+    output_path = tmp_path / "walk.npz"
+
+    with pytest.raises(ValueError, match=expected_error):
+        ReferenceMotionNpzWriter().write(motion, output_path)
+
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("names", "expected_error"),
+    [
+        pytest.param(
+            {"dof_names": ("left_hip",)},
+            "dof_names count must match dof_pos axis 2, got 1",
+            id="dof-count",
+        ),
+        pytest.param(
+            {"body_names": ("pelvis",)},
+            "body_names count must match body_pos axis 2, got 1",
+            id="body-count",
+        ),
+        pytest.param(
+            {"dof_names": ("left_hip", "")},
+            "dof_names must contain non-empty strings",
+            id="non-empty",
+        ),
+        pytest.param(
+            {"body_names": ("pelvis", chr(0xD800))},
+            "body_names must contain valid UTF-8 strings",
+            id="utf8",
+        ),
+    ],
+)
+def test_reference_motion_npz_writer_rejects_incoherent_axis_names(
+    tmp_path: Path,
+    names: dict[str, tuple[str, ...]],
+    expected_error: str,
+) -> None:
+    from mjlab_playground.motion_lib.reference_motion_npz_writer import (
+        ReferenceMotionNpzWriter,
+    )
+
+    motion = dataclasses.replace(_rich_reference_motion(), **names)
+    output_path = tmp_path / "walk.npz"
+
+    with pytest.raises(ValueError, match=expected_error):
+        ReferenceMotionNpzWriter().write(motion, output_path)
+
+    assert not output_path.exists()
 
 
 def test_reference_motion_npz_writer_rejects_rich_clip_with_fewer_than_three_frames(

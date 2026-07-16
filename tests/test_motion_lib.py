@@ -35,11 +35,10 @@ def _write_pyroki_npz(path: Path) -> None:
 
 
 def _reference_motion(*, fps: float = 60.0, name: str = "walk_retargeted.npz"):
-    from mjlab_playground.motion_lib import ReferenceMotionState
+    from mjlab_playground.motion_lib import ReferenceMotion
 
-    return ReferenceMotionState(
+    return ReferenceMotion(
         name=name,
-        display_name=name.removesuffix(".npz"),
         fps=fps,
         root_pos=torch.tensor([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]),
         root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
@@ -51,11 +50,10 @@ def _reference_motion(*, fps: float = 60.0, name: str = "walk_retargeted.npz"):
 
 
 def _package_reference_motion():
-    from mjlab_playground.motion_lib import ReferenceMotionState
+    from mjlab_playground.motion_lib import ReferenceMotion
 
-    return ReferenceMotionState(
+    return ReferenceMotion(
         name="package",
-        display_name="package",
         fps=10.0,
         root_pos=torch.tensor(
             [
@@ -108,7 +106,7 @@ def test_motion_lib_query_reads_exact_frames_from_multi_clip_package() -> None:
     from mjlab_playground.motion_lib import (
         MotionLib,
         MotionLibCfg,
-        ReferenceMotionState,
+        ReferenceMotion,
     )
 
     motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
@@ -120,7 +118,7 @@ def test_motion_lib_query_reads_exact_frames_from_multi_clip_package() -> None:
         motion_times=torch.tensor([0.1, 0.0, 0.2]),
     )
 
-    assert isinstance(result, ReferenceMotionState)
+    assert isinstance(result, ReferenceMotion)
     assert result.clip_starts is None
     assert result.clip_lengths is None
     assert result.clip_fps is None
@@ -150,11 +148,11 @@ def test_motion_lib_query_interpolates_clip_local_times() -> None:
     from mjlab_playground.motion_lib import (
         MotionLib,
         MotionLibCfg,
-        ReferenceMotionState,
+        ReferenceMotion,
     )
 
     motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
-    package = ReferenceMotionState(
+    package = ReferenceMotion(
         fps=10.0,
         root_pos=torch.tensor([[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [2.0, 4.0, 0.0]]),
         root_rot=torch.stack([_z_quat(0.0), _z_quat(90.0), _z_quat(180.0)]),
@@ -214,11 +212,11 @@ def test_motion_lib_query_interpolates_optional_reference_fields() -> None:
     from mjlab_playground.motion_lib import (
         MotionLib,
         MotionLibCfg,
-        ReferenceMotionState,
+        ReferenceMotion,
     )
 
     motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
-    package = ReferenceMotionState(
+    package = ReferenceMotion(
         fps=10.0,
         root_pos=torch.zeros(3, 3),
         root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
@@ -323,11 +321,11 @@ def test_motion_lib_query_returns_contact_fields() -> None:
     from mjlab_playground.motion_lib import (
         MotionLib,
         MotionLibCfg,
-        ReferenceMotionState,
+        ReferenceMotion,
     )
 
     motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
-    package = ReferenceMotionState(
+    package = ReferenceMotion(
         fps=10.0,
         root_pos=torch.zeros(3, 3),
         root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(3, 1),
@@ -442,7 +440,7 @@ def test_motion_lib_scalar_transformations_reject_collection_inputs(
     _reject_adapter_creation(monkeypatch)
     motion_lib = MotionLib(MotionLibCfg(output_fps=60.0))
 
-    with pytest.raises(TypeError, match="one ReferenceMotionState"):
+    with pytest.raises(TypeError, match=r"one ReferenceMotion$"):
         getattr(motion_lib, method_name)([_reference_motion()])
 
 
@@ -462,7 +460,7 @@ def test_motion_lib_loads_pyroki_source_clips_without_contact_labels(
     assert len(motions) == 1
     motion = motions[0]
     assert motion.name == "walk_retargeted.npz"
-    assert motion.display_name == "walk_retargeted"
+    assert not hasattr(motion, "display_name")
     assert motion.fps == 50.0
     assert motion.root_pos.device == torch.device("cpu")
     assert motion.foot_contacts is None
@@ -484,7 +482,7 @@ def test_motion_lib_resamples_loaded_source_clip_to_output_fps(
 
     assert motion is not source_motion
     assert motion.name == "walk_retargeted.npz"
-    assert motion.display_name == "walk_retargeted"
+    assert not hasattr(motion, "display_name")
     assert motion.fps == 60.0
     torch.testing.assert_close(
         motion.root_pos[:, 0],
@@ -617,7 +615,7 @@ def test_motion_lib_full_pipeline_enriches_resampled_clip_without_writing_artifa
         }
     ]
     assert rich.name == "walk_retargeted.npz"
-    assert rich.display_name == "walk_retargeted"
+    assert not hasattr(rich, "display_name")
     assert rich.fps == 60.0
     torch.testing.assert_close(
         rich.root_pos[:, 0],
@@ -652,6 +650,18 @@ def test_motion_lib_enrich_rejects_source_rate_clip_with_name(
         match="walk_retargeted\\.npz.*cfg\\.output_fps=60\\.0.*motion\\.fps=30\\.0",
     ):
         motion_lib.enrich(_reference_motion(fps=30.0))
+
+
+def test_motion_lib_enrich_uses_unnamed_diagnostic_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    _reject_adapter_creation(monkeypatch)
+    motion_lib = MotionLib(MotionLibCfg(output_fps=60.0))
+
+    with pytest.raises(ValueError, match="<unnamed motion>"):
+        motion_lib.enrich(dataclasses.replace(_reference_motion(fps=30.0), name=None))
 
 
 @pytest.mark.parametrize(

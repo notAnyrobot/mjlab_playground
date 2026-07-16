@@ -530,9 +530,6 @@ def _frame_count(motion: Any) -> int:
 
 
 def _motion_name(motion: Any) -> str:
-    display_name = getattr(motion, "display_name", None)
-    if display_name:
-        return str(display_name)
     name = getattr(motion, "name", None)
     if name:
         return str(name)

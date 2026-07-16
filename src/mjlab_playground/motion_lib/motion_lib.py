@@ -14,7 +14,6 @@ from .motion_loader import (
     MotionLoader,
     ReferenceFrame,
     ReferenceMotion,
-    ReferenceMotionState,
     _validate_integer_fps,
 )
 from .motion_resampler import MotionResamplingCfg, ReferenceMotionResampler
@@ -112,7 +111,7 @@ class MotionLib:
         )
         self._enrichment_adapter: Any | None = None
 
-    def load(self, motion_files: str | Path) -> list[ReferenceMotionState]:
+    def load(self, motion_files: str | Path) -> list[ReferenceMotion]:
         """Load source generalized-coordinate clips with the configured source format."""
         return MotionLoader.load(
             motion_files,
@@ -123,11 +122,11 @@ class MotionLib:
 
     def resample(
         self,
-        motion: ReferenceMotionState,
-    ) -> ReferenceMotionState:
+        motion: ReferenceMotion,
+    ) -> ReferenceMotion:
         """Resample one source clip without simulator enrichment."""
-        if not isinstance(motion, ReferenceMotionState):
-            raise TypeError("MotionLib.resample expects one ReferenceMotionState")
+        if not isinstance(motion, ReferenceMotion):
+            raise TypeError("MotionLib.resample expects one ReferenceMotion")
         try:
             return self._resampler.resample(motion)
         except Exception as exc:
@@ -136,11 +135,11 @@ class MotionLib:
 
     def query(
         self,
-        motion: ReferenceMotionState,
+        motion: ReferenceMotion,
         *,
         motion_ids: torch.Tensor,
         motion_times: torch.Tensor,
-    ) -> ReferenceMotionState:
+    ) -> ReferenceMotion:
         """Query package-shaped reference motion tensors by clip ID and seconds."""
         if not isinstance(motion_ids, torch.Tensor):
             raise TypeError("motion_ids must be a torch.Tensor")
@@ -189,9 +188,8 @@ class MotionLib:
         lower_indices = clip_starts[motion_ids] + local_lower
         upper_indices = clip_starts[motion_ids] + local_upper
 
-        return ReferenceMotionState(
+        return ReferenceMotion(
             name=motion.name,
-            display_name=motion.display_name,
             fps=motion.fps,
             root_pos=self._lerp_indexed_values(
                 motion.root_pos, lower_indices, upper_indices, blend
@@ -233,7 +231,7 @@ class MotionLib:
 
     @staticmethod
     def _package_clip_metadata(
-        motion: ReferenceMotionState,
+        motion: ReferenceMotion,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if (
             motion.clip_starts is None
@@ -345,16 +343,16 @@ class MotionLib:
         return torch.nn.functional.normalize(result, dim=-1)
 
     @staticmethod
-    def _motion_identifier(motion: ReferenceMotionState) -> str:
-        return motion.name or motion.display_name or "<unnamed motion>"
+    def _motion_identifier(motion: ReferenceMotion) -> str:
+        return motion.name or "<unnamed motion>"
 
     def enrich(
         self,
-        motion: ReferenceMotionState,
-    ) -> ReferenceMotionState:
+        motion: ReferenceMotion,
+    ) -> ReferenceMotion:
         """Enrich one already-resampled clip with simulator-derived body fields."""
-        if not isinstance(motion, ReferenceMotionState):
-            raise TypeError("MotionLib.enrich expects one ReferenceMotionState")
+        if not isinstance(motion, ReferenceMotion):
+            raise TypeError("MotionLib.enrich expects one ReferenceMotion")
         self._validate_enrich_input(motion)
         adapter = self._get_enrichment_adapter()
         try:
@@ -368,12 +366,12 @@ class MotionLib:
     def _enrich_motion(
         self,
         adapter: Any,
-        motion: ReferenceMotionState,
-    ) -> ReferenceMotionState:
+        motion: ReferenceMotion,
+    ) -> ReferenceMotion:
         frames: list[ReferenceFrame] = []
         frame_count = int(motion.root_pos.shape[0])
         for frame_index in range(frame_count):
-            source_frame = motion.frame(frame_index)
+            source_frame = motion.get_frame(frame_index)
             adapter.apply_frame(source_frame)
             rich_frame = adapter.read_robot_state()
             frames.append(
@@ -395,7 +393,6 @@ class MotionLib:
         return ReferenceMotion.from_frames(
             frames,
             name=motion.name,
-            display_name=motion.display_name,
             fps=motion.fps,
             clip_starts=motion.clip_starts,
             clip_lengths=motion.clip_lengths,
@@ -406,7 +403,7 @@ class MotionLib:
             body_names=tuple(adapter.body_names),
         )
 
-    def _validate_enrich_input(self, motion: ReferenceMotionState) -> None:
+    def _validate_enrich_input(self, motion: ReferenceMotion) -> None:
         if motion.fps != self.cfg.output_fps:
             identifier = self._motion_identifier(motion)
             raise ValueError(
@@ -431,12 +428,12 @@ class MotionLib:
 
     def _validate_enrich_output(
         self,
-        source_motion: ReferenceMotionState,
+        source_motion: ReferenceMotion,
         rich_motion: object,
     ) -> None:
-        if not isinstance(rich_motion, ReferenceMotionState):
+        if not isinstance(rich_motion, ReferenceMotion):
             raise TypeError(
-                "MotionLib.enrich must return ReferenceMotionState objects"
+                "MotionLib.enrich must return ReferenceMotion objects"
             )
         for field_name in self._ENRICH_OUTPUT_BODY_FIELDS:
             if getattr(rich_motion, field_name) is None:

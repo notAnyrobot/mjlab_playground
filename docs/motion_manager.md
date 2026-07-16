@@ -1,25 +1,25 @@
 # Motion Manager Usage
 
 The motion manager is the runtime policy layer over a package-shaped
-`ReferenceMotionState`. It chooses clip-local `motion_ids` and `motion_times`;
+`ReferenceMotion`. It chooses clip-local `motion_ids` and `motion_times`;
 `MotionLib` owns query and interpolation.
 
-## Reference Motion State
+## Reference Motion
 
-`ReferenceMotionState` is the common batched pose/state container. Ordinary
+`ReferenceMotion` is the common batched pose/state container. Ordinary
 loaded clips and sampled query results do not need clip metadata. Multi-clip
 packages provide packed frame tensors plus contiguous clip metadata:
 
 ```python
 import torch
 
-from mjlab_playground.motion_lib import ReferenceMotionState
+from mjlab_playground.motion_lib import ReferenceMotion
 
 clip_lengths = torch.tensor([6, 11], dtype=torch.long)
 clip_starts = torch.tensor([0, 6], dtype=torch.long)
 frame_count = int(clip_lengths.sum())
 
-motion = ReferenceMotionState(
+motion = ReferenceMotion(
     name="training-package",
     fps=10.0,
     root_pos=torch.zeros(frame_count, 3),
@@ -36,7 +36,10 @@ counts, and `clip_fps` carries the per-clip FPS used to turn seconds into frame
 positions.
 
 When package metadata is omitted, `MotionLib.query` and the samplers treat the
-state as one clip spanning the full batch.
+reference motion as one clip spanning the full batch.
+
+`ReferenceMotionState` remains available only as a deprecated compatibility
+alias for downstream callers. New code should import and use `ReferenceMotion`.
 
 ## AMP-Style Sampling
 
