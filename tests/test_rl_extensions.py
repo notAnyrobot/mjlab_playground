@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import ast
 import inspect
+from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import mjlab_playground.rl_extensions.algorithms.ppo as ppo_mod
 import pytest
 import torch
-from mjlab_playground.rl_extensions import MjPgOnPolicyRunnerCfg, MjPgPpo
+from mjlab.rl.runner import MjlabOnPolicyRunner
+from mjlab_playground.rl_extensions import (
+    MjPgModelCfg,
+    MjPgOnPolicyRunnerCfg,
+    MjPgPpo,
+    MjPgPpoAlgorithmCfg,
+    RndCfg,
+)
 from mjlab_playground.rl_extensions.l2c2 import L2C2, L2C2Cfg, resolve_l2c2_config
+from rsl_rl.env import VecEnv
 from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
 
@@ -46,6 +57,84 @@ def _loss_batch() -> RolloutStorage.Batch:
         advantages=torch.tensor([[1.0], [-0.5]]),
         returns=torch.tensor([[0.5], [1.0]]),
         old_actions_log_prob=torch.tensor([[0.0], [0.1]]),
+    )
+
+
+def test_rnd_config_has_reusable_typed_defaults() -> None:
+    cfg = RndCfg()
+
+    assert asdict(cfg) == {
+        "num_outputs": 1,
+        "predictor_hidden_dims": (-1, -1),
+        "target_hidden_dims": (-1,),
+        "activation": "elu",
+        "state_normalization": True,
+        "reward_normalization": False,
+        "weight": 1.0,
+        "weight_schedule": None,
+        "learning_rate": 0.001,
+    }
+
+
+def test_rnd_config_serializes_recursively_without_an_adapter() -> None:
+    cfg = MjPgPpoAlgorithmCfg(rnd_cfg=RndCfg())
+
+    assert asdict(cfg)["rnd_cfg"] == asdict(RndCfg())
+
+
+def test_rnd_is_disabled_when_algorithm_config_is_none() -> None:
+    cfg = MjPgPpoAlgorithmCfg(rnd_cfg=None)
+
+    assert asdict(cfg)["rnd_cfg"] is None
+
+
+def test_five_value_rnd_state_reaches_live_algorithm_construction() -> None:
+    obs = TensorDict(
+        {
+            "actor": torch.zeros(2, 3),
+            "critic": torch.zeros(2, 4),
+            "rnd_state": torch.zeros(2, 5),
+        },
+        batch_size=[2],
+    )
+    runner_cfg = MjPgOnPolicyRunnerCfg(
+        num_steps_per_env=2,
+        actor=MjPgModelCfg(hidden_dims=(4,)),
+        critic=MjPgModelCfg(hidden_dims=(4,)),
+        algorithm=MjPgPpoAlgorithmCfg(l2c2_cfg=None, rnd_cfg=RndCfg()),
+    )
+    env = cast(
+        VecEnv,
+        SimpleNamespace(
+            cfg={},
+            num_actions=2,
+            num_envs=2,
+            unwrapped=SimpleNamespace(step_dt=0.02),
+            get_observations=lambda: obs,
+        ),
+    )
+
+    runner = MjlabOnPolicyRunner(env, asdict(runner_cfg), device="cpu")
+    alg = runner.alg
+
+    assert alg.rnd is not None
+    assert alg.rnd.num_states == 5
+    assert alg.rnd.initial_weight == pytest.approx(0.02)
+    assert alg.rnd.target(torch.zeros(2, 5)).shape == (2, 1)
+    assert alg.rnd.predictor(torch.zeros(2, 5)).shape == (2, 1)
+    assert sum(parameter.numel() for parameter in alg.rnd.target.parameters()) == 36
+    assert sum(parameter.numel() for parameter in alg.rnd.predictor.parameters()) == 66
+
+    optimized_parameters = {
+        id(parameter)
+        for group in alg.rnd.optimizer.param_groups
+        for parameter in group["params"]
+    }
+    assert optimized_parameters == {
+        id(parameter) for parameter in alg.rnd.predictor.parameters()
+    }
+    assert optimized_parameters.isdisjoint(
+        id(parameter) for parameter in alg.rnd.target.parameters()
     )
 
 

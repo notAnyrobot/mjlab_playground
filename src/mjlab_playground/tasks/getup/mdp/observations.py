@@ -32,3 +32,14 @@ def body_projected_gravity(
     )
     quat = asset.data.body_link_quat_w[:, body_ids[0]]
     return quat_apply_inverse(quat, gravity_w)
+
+
+def body_height(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """World-frame z-height of one selected body."""
+    asset: Entity = env.scene[asset_cfg.name]
+    body_ids = asset_cfg.body_ids
+    assert isinstance(body_ids, list)
+    return asset.data.body_link_pos_w[:, body_ids, 2]

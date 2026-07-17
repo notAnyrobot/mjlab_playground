@@ -9,6 +9,14 @@ register_mjlab_task(
     task_id="Mjlab-Getup-Flat-Astro",
     env_cfg=astro_getup_env_cfg(),
     play_env_cfg=astro_getup_env_cfg(play=True),
-    rl_cfg=astro_getup_ppo_runner_cfg(),
+    rl_cfg=astro_getup_ppo_runner_cfg(l2c2=True, rnd=False),
+    runner_cls=GetupOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Getup-Flat-Astro-RND",
+    env_cfg=astro_getup_env_cfg(),
+    play_env_cfg=astro_getup_env_cfg(play=True),
+    rl_cfg=astro_getup_ppo_runner_cfg(l2c2=True, rnd=True),
     runner_cls=GetupOnPolicyRunner,
 )

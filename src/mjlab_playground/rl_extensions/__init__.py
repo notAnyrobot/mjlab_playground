@@ -10,5 +10,6 @@ from mjlab_playground.rl_extensions.config import (
 from mjlab_playground.rl_extensions.config import (
     MjPgPpoAlgorithmCfg as MjPgPpoAlgorithmCfg,
 )
+from mjlab_playground.rl_extensions.config import RndCfg as RndCfg
 
-__all__ = ["MjPgModelCfg", "MjPgOnPolicyRunnerCfg", "MjPgPpoAlgorithmCfg"]
+__all__ = ["MjPgModelCfg", "MjPgOnPolicyRunnerCfg", "MjPgPpoAlgorithmCfg", "RndCfg"]

@@ -18,6 +18,38 @@ MjPgModelClassName = Literal[
 
 
 @dataclass
+class RndCfg:
+    """Configuration for RSL-RL random network distillation."""
+
+    num_outputs: int = 1
+    """Output width of the target and predictor networks."""
+
+    predictor_hidden_dims: tuple[int, ...] = (-1, -1)
+    """Predictor hidden widths; ``-1`` resolves to the RND input width."""
+
+    target_hidden_dims: tuple[int, ...] = (-1,)
+    """Target hidden widths; ``-1`` resolves to the RND input width."""
+
+    activation: str = "elu"
+    """Activation used by the target and predictor networks."""
+
+    state_normalization: bool = True
+    """Whether to normalize the RND input state online."""
+
+    reward_normalization: bool = False
+    """Whether to normalize intrinsic rewards online."""
+
+    weight: float = 1.0
+    """Intrinsic-reward weight before environment-step scaling."""
+
+    weight_schedule: dict[str, Any] | None = None
+    """Optional upstream RSL-RL weight-schedule configuration."""
+
+    learning_rate: float = 0.001
+    """Learning rate of the predictor optimizer."""
+
+
+@dataclass
 class MjPgModelCfg(RslRlModelCfg):
     """Model config with playground-specific class-name options."""
 
@@ -32,7 +64,7 @@ class MjPgPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     l2c2_cfg: L2C2Cfg | None = field(default_factory=L2C2Cfg)
     """Optional L2C2 configuration"""
 
-    rnd_cfg: dict[str, Any] | None = None
+    rnd_cfg: RndCfg | None = None
     """Optional RSL-RL random network distillation config."""
 
     symmetry_cfg: dict[str, Any] | None = None
@@ -44,7 +76,6 @@ class MjPgPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
 @dataclass
 class MjPgOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
-
     actor: RslRlModelCfg = field(
         default_factory=lambda: MjPgModelCfg(
             distribution_cfg={

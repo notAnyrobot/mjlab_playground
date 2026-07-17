@@ -63,3 +63,41 @@ def test_astro_actor_clean_observations_match_actor_terms() -> None:
     assert cfg.observations["actor_clean"].terms == cfg.observations["actor"].terms
     assert cfg.observations["actor_clean"].terms is not cfg.observations["actor"].terms
     assert cfg.observations["actor_clean"].enable_corruption is False
+
+
+def test_astro_curiosity_group_has_only_current_recovery_state() -> None:
+    cfg = astro_getup_env_cfg()
+
+    assert tuple(cfg.observations["actor"].terms) == (
+        "base_ori",
+        "base_ang_vel",
+        "projected_gravity",
+        "joint_pos",
+        "joint_vel",
+        "actions",
+    )
+    assert tuple(cfg.observations["critic"].terms) == (
+        "base_pos",
+        "base_ori",
+        "base_lin_vel",
+        "base_ang_vel",
+        "projected_gravity",
+        "joint_pos",
+        "joint_vel",
+        "actions",
+    )
+    assert tuple(cfg.observations["actor_clean"].terms) == tuple(
+        cfg.observations["actor"].terms
+    )
+
+    rnd_state = cfg.observations["rnd_state"]
+    assert tuple(rnd_state.terms) == (
+        "torso_projected_gravity",
+        "torso_height",
+        "pelvis_height",
+    )
+    assert rnd_state.concatenate_terms is True
+    assert rnd_state.enable_corruption is False
+    assert rnd_state.history_length == 0
+    assert all(term.history_length == 0 for term in rnd_state.terms.values())
+    assert all(term.noise is None for term in rnd_state.terms.values())

@@ -3,7 +3,7 @@
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.managers.event_manager import EventTermCfg
-from mjlab.managers.observation_manager import ObservationTermCfg
+from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -105,6 +105,33 @@ def astro_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     # Clean counterparts for L2C2
     build_clean_actor_obs(cfg)
+    cfg.observations["rnd_state"] = ObservationGroupCfg(
+        terms={
+            "torso_projected_gravity": ObservationTermCfg(
+                func=mdp.body_projected_gravity,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",))
+                },
+            ),
+            "torso_height": ObservationTermCfg(
+                func=mdp.body_height,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",))
+                },
+                clip=(0.0, 1.25 * _TORSO_HEIGHT),
+                scale=1.0 / _TORSO_HEIGHT,
+            ),
+            "pelvis_height": ObservationTermCfg(
+                func=mdp.body_height,
+                params={"asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",))},
+                clip=(0.0, 1.25 * _PELVIS_HEIGHT),
+                scale=1.0 / _PELVIS_HEIGHT,
+            ),
+        },
+        concatenate_terms=True,
+        enable_corruption=False,
+        history_length=0,
+    )
 
     cfg.viewer.body_name = "torso_link"
 
