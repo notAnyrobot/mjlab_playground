@@ -18,8 +18,8 @@ from ..motion_viewer import (
 
 _KEY_ACTIONS = {
     32: PlaybackAction.TOGGLE_PAUSE,
-    262: PlaybackAction.NEXT_MOTION,
-    263: PlaybackAction.PREVIOUS_MOTION,
+    262: PlaybackAction.NEXT_CLIP,
+    263: PlaybackAction.PREVIOUS_CLIP,
     264: PlaybackAction.SLOWER,
     265: PlaybackAction.FASTER,
     92: PlaybackAction.RECORD_SELECTED_CLIP,

@@ -29,8 +29,24 @@ A normalized root or body quaternion stored in MuJoCo-facing <code>wxyz</code> o
 _Avoid_: Source quaternion, xyzw reference quaternion
 
 **Reference motion**:
-A tensor-backed collection of one or more reference-frame trajectories plus clip metadata such as clip starts, clip lengths, and clip FPS. A single source motion clip is represented as one-clip reference motion; packaged multi-clip data is represented by the same concept.
+A tensor-backed collection of one or more reference-frame trajectories plus clip and axis metadata. A single source motion clip and an assembled multi-clip dataset use the same canonical concept.
 _Avoid_: Motion file, motion source, reference motion state
+
+**Reference motion clip span**:
+A lightweight logical description of one clip inside a packed reference motion. It identifies the clip's boundaries, timing, and name while retaining the packed reference motion as the source of frames.
+_Avoid_: Extracted reference motion, copied clip, display motion
+
+**Reference motion assembly**:
+The deterministic combination of compatible rich reference clips into one reference motion with contiguous clip metadata. It does not resample, enrich, repair, or serialize its inputs.
+_Avoid_: MotionLib packaging, dataset conversion, implicit normalization
+
+**Versioned reference motion artifact**:
+A self-describing, device-neutral `.npz` serialization of one canonical reference motion, containing either one clip or multiple clips under the same schema.
+_Avoid_: PyTorch checkpoint, `.pt` motion package, YAML motion manifest
+
+**Legacy rich reference artifact**:
+An existing unversioned, single-clip rich `.npz` artifact. It remains readable but is not an input to versioned reference motion assembly.
+_Avoid_: Versioned reference motion artifact, packaged reference motion
 
 **Robot-specific reference motion clip**:
 A reference motion trajectory whose generalized coordinates already target one concrete robot's kinematic layout, such as Astro root pose and Astro joint angles.
@@ -41,11 +57,15 @@ A reference motion trajectory with at least three frames. One-frame and two-fram
 _Avoid_: Single-frame reference, two-frame reference
 
 **Recording attachment**:
-An optional helper attached by a viewer runner to capture rendered frames and write video artifacts. It is not part of the source-agnostic motion viewer interface and may depend on offscreen rendering.
+An internal helper used by the reference motion viewer to capture rendered frames and write video artifacts. It is not exposed to launch runners or other callers and may depend on offscreen rendering.
 _Avoid_: Viewer recording mode, motion source recorder
 
+**Background recording**:
+A deterministic full-clip recording requested from an interactive reference motion viewer and executed independently of interactive playback. Interactive pause, speed, and frame position do not affect its traversal of the selected clip. It reuses headless recording internally but is distinct from headless batch mode, where no interactive viewer is running.
+_Avoid_: Live recording, headless batch recording, paused viewer recording
+
 **Reference motion viewer**:
-A source-agnostic viewer for already-loaded reference motion clips. It plays, scrubs, switches, and optionally records clips without knowing which motion artifact format produced them.
+A source- and presentation-agnostic viewer for already-loaded reference motion clips. It owns consistent playback, switching, status, and recording semantics while hiding the concrete interactive viewer and recording implementation from callers.
 _Avoid_: PyRoki viewer, motion file viewer, loader viewer
 
 **Root-tracking camera**:
@@ -59,6 +79,10 @@ _Avoid_: Motion loader, simulator enricher, file converter
 **Simulator enrichment**:
 A preprocessing step owned by MotionLib that applies already-resampled robot-specific generalized coordinates to a robot model or simulator to derive rich reference clip fields such as body poses and body velocities.
 _Avoid_: Resampling, interpolation
+
+**Motion scene**:
+An already-constructed robot scene that accepts reference frames and exposes the resulting robot state for viewing, recording, or simulator enrichment. Orchestration modules construct and inject it; reference motion viewers and MotionLib do not create it.
+_Avoid_: Motion viewer, motion loader, viewer adapter
 
 **MuJoCo scene adapter**:
 The motion-library module that owns a one-environment mjlab MuJoCo scene, robot entity, simulation step/update order, reference-frame application, display synchronization, root-tracking camera setup, and current robot-state reading. It does not own motion-level enrichment or package assembly.
@@ -81,8 +105,8 @@ Deferred float contact labels produced by time-aware interpolation of source foo
 _Avoid_: Hard contact labels, simulator-detected contacts, ProtoMotions OR contacts
 
 **Packaged motion metadata**:
-Dataset-level information, such as FPS, clip starts, clip lengths, body names, joint names, and schema version, stored with a future packaged motion artifact rather than repeated inside every per-clip train-ready `.npz`.
-_Avoid_: Per-clip duplicated metadata, implicit body index contract
+Artifact-level information including FPS, clip starts, clip lengths, clip names, body names, DOF names, and schema version. Every versioned reference motion artifact carries this metadata whether it contains one clip or many.
+_Avoid_: Implicit axis order, external YAML metadata, joint names
 
 **Generalized-coordinate velocity**:
 A velocity field derived only from generalized-coordinate reference tensors, such as root position, root quaternion, and joint positions. These fields are produced by the reference motion resampler, not by simulator enrichment.
@@ -107,3 +131,7 @@ _Avoid_: Mimic track, env playback state
 **Motion sampler**:
 The motion-library module that owns reference motion sampling policy, sampling weights, valid time windows, and optional per-environment mimic motion tracks. It does not load source files, resample clips, run simulator enrichment, or query motion tensors.
 _Avoid_: MotionLib, MotionLoader, MotionCommand
+
+**Astro getup curiosity state**:
+The compact, training-only state used by random network distillation in the opt-in Astro getup experiment. It contains torso-frame projected gravity together with normalized torso and pelvis heights; it excludes policy-observation noise, history, actions, velocities, contacts, and joint posture.
+_Avoid_: Actor observation, critic observation, full simulator state, RND embedding

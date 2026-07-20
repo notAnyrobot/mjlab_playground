@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from mjlab_playground.motion_lib import ReferenceMotion, ReferenceMotionClipSpan
 from mjlab_playground.motion_lib.motion_viewer import (
     MotionScene,
     MotionViewer,
@@ -27,6 +28,16 @@ class FakeReferenceMotion:
         self.name = name
         self.fps = fps
         self.root_pos = torch.zeros(frame_count, 3)
+        self.clip_name_bytes = None
+
+    def iter_clip_spans(self):
+        yield ReferenceMotionClipSpan(
+            parent=self,  # type: ignore[arg-type]
+            clip_id=0,
+            start_frame=0,
+            frame_count=int(self.root_pos.shape[0]),
+            fps=self.fps,
+        )
 
 
 class InMemoryMotionScene:
@@ -78,17 +89,17 @@ class ScriptedViewerAdapter:
 class FakeBackgroundRecorder:
     def __init__(self) -> None:
         self.status = RecordingStatus.IDLE
-        self.requests: list[tuple[int, FakeReferenceMotion]] = []
+        self.requests: list[tuple[int, ReferenceMotionClipSpan]] = []
         self.wait_calls = 0
         self.cancel_calls = 0
         self.close_calls = 0
 
     def record_selected_clip(
         self,
-        motion_index: int,
-        motion: FakeReferenceMotion,
+        clip_index: int,
+        clip: ReferenceMotionClipSpan,
     ) -> None:
-        self.requests.append((motion_index, motion))
+        self.requests.append((clip_index, clip))
         self.status = RecordingStatus.RUNNING
 
     def poll(self) -> None:
@@ -160,6 +171,98 @@ class OrderedCloseAdapter(ScriptedViewerAdapter):
     def close(self) -> None:
         super().close()
         self.events.append("adapter_close")
+
+
+def test_run_flattens_logical_clips_and_applies_packed_parent_frames() -> None:
+    package = ReferenceMotion(
+        name="package.npz",
+        fps=30.0,
+        root_pos=torch.zeros(5, 3),
+        root_rot=torch.zeros(5, 4),
+        dof_pos=torch.zeros(5, 2),
+        clip_starts=torch.tensor([0, 2]),
+        clip_lengths=torch.tensor([2, 3]),
+        clip_fps=torch.tensor([2.0, 4.0]),
+        clip_name_bytes=torch.tensor(list(b"walkjump"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, 4, 8]),
+    )
+    balance = ReferenceMotion(
+        name="balance",
+        fps=1.0,
+        root_pos=torch.zeros(4, 3),
+        root_rot=torch.zeros(4, 4),
+        dof_pos=torch.zeros(4, 2),
+    )
+    scene = InMemoryMotionScene()
+    adapter = ScriptedViewerAdapter(
+        [
+            ViewerTick(0.0),
+            ViewerTick(0.0, (PlaybackAction.NEXT_CLIP,)),
+            ViewerTick(0.25),
+            ViewerTick(0.0, (PlaybackAction.NEXT_CLIP,)),
+            ViewerTick(0.0, (PlaybackAction.NEXT_CLIP,)),
+            ViewerTick(0.0, (PlaybackAction.PREVIOUS_CLIP,)),
+        ]
+    )
+
+    MotionViewer([package, balance], scene, viewer_adapter=adapter).run()
+
+    assert scene.applications == [
+        (package, 0),
+        (package, 2),
+        (package, 3),
+        (balance, 0),
+        (package, 0),
+        (balance, 0),
+    ]
+    assert [
+        (
+            snapshot.selected_clip_index,
+            snapshot.selected_clip_name,
+            snapshot.clip_count,
+            snapshot.frame_index,
+            snapshot.frame_count,
+        )
+        for snapshot in adapter.snapshots
+    ] == [
+        (0, "walk", 3, 0, 2),
+        (1, "jump", 3, 0, 3),
+        (1, "jump", 3, 1, 3),
+        (2, "balance", 3, 0, 4),
+        (0, "walk", 3, 0, 2),
+        (2, "balance", 3, 0, 4),
+    ]
+
+
+def test_run_loops_within_each_selected_clip_boundary() -> None:
+    package = ReferenceMotion(
+        name="package.npz",
+        root_pos=torch.zeros(5, 3),
+        root_rot=torch.zeros(5, 4),
+        dof_pos=torch.zeros(5, 2),
+        clip_starts=torch.tensor([0, 2]),
+        clip_lengths=torch.tensor([2, 3]),
+        clip_fps=torch.tensor([2.0, 4.0]),
+        clip_name_bytes=torch.tensor(list(b"walkjump"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, 4, 8]),
+    )
+    scene = InMemoryMotionScene()
+    adapter = ScriptedViewerAdapter(
+        [
+            ViewerTick(1.5),
+            ViewerTick(0.0, (PlaybackAction.NEXT_CLIP,)),
+            ViewerTick(0.75),
+        ]
+    )
+
+    MotionViewer([package], scene, viewer_adapter=adapter).run()
+
+    assert scene.applications == [(package, 1), (package, 2), (package, 2)]
+    assert [snapshot.status.split(" | ", 2)[:2] for snapshot in adapter.snapshots] == [
+        ["Clip 1/2", "walk"],
+        ["Clip 2/2", "jump"],
+        ["Clip 2/2", "jump"],
+    ]
 
 
 def test_public_viewer_contract_is_limited_to_deep_operations() -> None:
@@ -326,12 +429,12 @@ def test_run_applies_initial_frame_and_returns_immutable_snapshot() -> None:
     assert adapter.snapshots == [
         ViewerSnapshot(
             status=(
-                "Motion 1/1 | walk | [--------------------] 0/4 (0.0%) "
+                "Clip 1/1 | walk | [--------------------] 0/4 (0.0%) "
                 "| speed 1x | playing"
             ),
-            selected_motion_index=0,
-            selected_motion_name="walk",
-            motion_count=1,
+            selected_clip_index=0,
+            selected_clip_name="walk",
+            clip_count=1,
             frame_index=0,
             frame_count=4,
             playback_speed=1.0,
@@ -354,9 +457,9 @@ def test_record_action_captures_selection_at_its_ordered_position() -> None:
             ViewerTick(
                 elapsed_seconds=0.0,
                 actions=(
-                    PlaybackAction.NEXT_MOTION,
+                    PlaybackAction.NEXT_CLIP,
                     PlaybackAction.RECORD_SELECTED_CLIP,
-                    PlaybackAction.PREVIOUS_MOTION,
+                    PlaybackAction.PREVIOUS_CLIP,
                     PlaybackAction.STOP,
                 ),
             )
@@ -371,9 +474,106 @@ def test_record_action_captures_selection_at_its_ordered_position() -> None:
 
     viewer.run()
 
-    assert recorder.requests == [(1, jump)]
-    assert adapter.snapshots[0].selected_motion_index == 0
+    assert len(recorder.requests) == 1
+    requested_index, requested_clip = recorder.requests[0]
+    assert (requested_index, requested_clip.parent, requested_clip.clip_id) == (
+        1,
+        jump,
+        0,
+    )
+    assert adapter.snapshots[0].selected_clip_index == 0
     assert adapter.snapshots[0].recording_status is RecordingStatus.RUNNING
+
+
+def test_record_action_keeps_nonzero_package_clip_identity_while_interaction_continues(
+    tmp_path: Path,
+) -> None:
+    package = ReferenceMotion(
+        name="package.npz",
+        root_pos=torch.zeros(5, 3),
+        root_rot=torch.zeros(5, 4),
+        dof_pos=torch.zeros(5, 2),
+        clip_starts=torch.tensor([0, 2]),
+        clip_lengths=torch.tensor([2, 3]),
+        clip_fps=torch.tensor([2.0, 4.0]),
+        clip_name_bytes=torch.tensor(list(b"walkjump"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, 4, 8]),
+    )
+    targets = (
+        RecordingRequestTarget(
+            reference_motion_index=0,
+            clip_id=0,
+            source_path=tmp_path / "package.npz",
+            output_path=tmp_path / "walk.mp4",
+        ),
+        RecordingRequestTarget(
+            reference_motion_index=0,
+            clip_id=1,
+            source_path=tmp_path / "package.npz",
+            output_path=tmp_path / "jump.mp4",
+        ),
+    )
+
+    class Child:
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+    requests: list[RecordingRequest] = []
+    recorder = SubprocessBackgroundRecorder(
+        targets=targets,
+        process_factory=lambda request: (requests.append(request), Child())[1],
+    )
+    scene = InMemoryMotionScene()
+    adapter = ScriptedViewerAdapter(
+        [
+            ViewerTick(
+                0.0,
+                (
+                    PlaybackAction.NEXT_CLIP,
+                    PlaybackAction.RECORD_SELECTED_CLIP,
+                ),
+            ),
+            ViewerTick(
+                0.5,
+                (
+                    PlaybackAction.PREVIOUS_CLIP,
+                    PlaybackAction.FASTER,
+                    PlaybackAction.TOGGLE_PAUSE,
+                ),
+            ),
+            ViewerTick(0.0, (PlaybackAction.STOP,)),
+        ]
+    )
+
+    MotionViewer(
+        [package],
+        scene,
+        viewer_adapter=adapter,
+        background_recorder=recorder,
+    ).run()
+
+    assert requests == [RecordingRequest(targets=(targets[1],))]
+    assert requests[0].targets[0] == RecordingRequestTarget(
+        reference_motion_index=0,
+        clip_id=1,
+        source_path=tmp_path / "package.npz",
+        output_path=tmp_path / "jump.mp4",
+    )
+    assert [snapshot.selected_clip_index for snapshot in adapter.snapshots] == [
+        1,
+        0,
+        0,
+    ]
+    assert scene.applications == [(package, 2), (package, 0)]
 
 
 def test_background_recording_is_polled_while_playback_and_selection_continue(
@@ -383,12 +583,14 @@ def test_background_recording_is_polled_while_playback_and_selection_continue(
     jump = FakeReferenceMotion(name="jump", frame_count=4, fps=2.0)
     targets = (
         RecordingRequestTarget(
-            motion_index=0,
+            reference_motion_index=0,
+            clip_id=0,
             source_path=tmp_path / "walk.npz",
             output_path=tmp_path / "walk.mp4",
         ),
         RecordingRequestTarget(
-            motion_index=1,
+            reference_motion_index=1,
+            clip_id=0,
             source_path=tmp_path / "jump.npz",
             output_path=tmp_path / "jump.mp4",
         ),
@@ -413,7 +615,7 @@ def test_background_recording_is_polled_while_playback_and_selection_continue(
             ViewerTick(
                 0.5,
                 (
-                    PlaybackAction.NEXT_MOTION,
+                    PlaybackAction.NEXT_CLIP,
                     PlaybackAction.FASTER,
                     PlaybackAction.TOGGLE_PAUSE,
                 ),
@@ -437,7 +639,7 @@ def test_background_recording_is_polled_while_playback_and_selection_continue(
         RecordingStatus.SUCCEEDED,
         RecordingStatus.SUCCEEDED,
     ]
-    assert adapter.snapshots[1].selected_motion_index == 1
+    assert adapter.snapshots[1].selected_clip_index == 1
     assert adapter.snapshots[1].paused is True
     assert adapter.snapshots[1].playback_speed == 1.25
     assert adapter.snapshots[2].recording_output_path == tmp_path / "walk.mp4"
@@ -453,7 +655,8 @@ def test_second_active_recording_request_is_visible_without_stopping_playback(
 ) -> None:
     motion = FakeReferenceMotion(name="walk", frame_count=4, fps=2.0)
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -509,13 +712,24 @@ def test_second_active_recording_request_is_visible_without_stopping_playback(
 def test_playback_actions_are_typed() -> None:
     assert tuple(PlaybackAction) == (
         PlaybackAction.TOGGLE_PAUSE,
-        PlaybackAction.PREVIOUS_MOTION,
-        PlaybackAction.NEXT_MOTION,
+        PlaybackAction.PREVIOUS_CLIP,
+        PlaybackAction.NEXT_CLIP,
         PlaybackAction.SLOWER,
         PlaybackAction.FASTER,
         PlaybackAction.RECORD_SELECTED_CLIP,
         PlaybackAction.STOP,
     )
+    assert not hasattr(PlaybackAction, "PREVIOUS_MOTION")
+    assert not hasattr(PlaybackAction, "NEXT_MOTION")
+
+    viewer = MotionViewer(
+        [FakeReferenceMotion(name="walk", frame_count=2, fps=2.0)],
+        InMemoryMotionScene(),
+    )
+    assert hasattr(viewer.controller, "selected_clip_index")
+    assert not hasattr(viewer.controller, "selected_motion_index")
+    assert hasattr(viewer, "selected_clip")
+    assert not hasattr(viewer, "selected_motion")
 
 
 def test_run_preserves_fractional_timing_and_ordered_playback_actions() -> None:
@@ -529,7 +743,7 @@ def test_run_preserves_fractional_timing_and_ordered_playback_actions() -> None:
             ViewerTick(elapsed_seconds=0.25),
             ViewerTick(
                 elapsed_seconds=0.25,
-                actions=(PlaybackAction.NEXT_MOTION, PlaybackAction.FASTER),
+                actions=(PlaybackAction.NEXT_CLIP, PlaybackAction.FASTER),
             ),
             ViewerTick(
                 elapsed_seconds=10.0,
@@ -537,7 +751,7 @@ def test_run_preserves_fractional_timing_and_ordered_playback_actions() -> None:
             ),
             ViewerTick(
                 elapsed_seconds=0.0,
-                actions=(PlaybackAction.PREVIOUS_MOTION,),
+                actions=(PlaybackAction.PREVIOUS_CLIP,),
             ),
             ViewerTick(
                 elapsed_seconds=0.5,
@@ -566,7 +780,7 @@ def test_run_preserves_fractional_timing_and_ordered_playback_actions() -> None:
     ]
     assert [
         (
-            snapshot.selected_motion_index,
+            snapshot.selected_clip_index,
             snapshot.frame_index,
             snapshot.playback_speed,
             snapshot.paused,
@@ -595,7 +809,7 @@ def test_scene_failure_stops_closes_once_and_preserves_original_cause() -> None:
 
     with pytest.raises(
         ViewerError,
-        match=r"failed to apply frame 0 from motion 1/1 \(walk\)",
+        match=r"failed to apply frame 0 from clip 1/1 \(walk\)",
     ) as error:
         viewer.run()
 
@@ -608,7 +822,7 @@ def test_scene_failure_stops_closes_once_and_preserves_original_cause() -> None:
 @pytest.mark.parametrize(
     ("failure_source", "message"),
     [
-        ("scene", r"failed to apply frame 0 from motion 1/1 \(walk\)"),
+        ("scene", r"failed to apply frame 0 from clip 1/1 \(walk\)"),
         ("adapter", "reference motion viewer session failed"),
     ],
 )
@@ -661,7 +875,7 @@ def test_fatal_session_failure_settles_active_recording_and_preserves_primary_er
 @pytest.mark.parametrize(
     ("failure_source", "message"),
     [
-        ("scene", r"failed to apply frame 0 from motion 1/1 \(walk\)"),
+        ("scene", r"failed to apply frame 0 from clip 1/1 \(walk\)"),
         ("adapter", "reference motion viewer session failed"),
     ],
 )
@@ -728,7 +942,8 @@ def test_persistent_recording_ownership_close_failure_is_never_silent(
         else InMemoryMotionScene()
     )
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -758,7 +973,8 @@ def test_persistent_recording_ownership_close_failure_is_never_silent(
         process_factory=start_child,
     )
     target.output_path.write_bytes(b"partial")
-    recorder.record_selected_clip(0, motion)
+    clip = next(motion.iter_clip_spans())
+    recorder.record_selected_clip(0, clip)
     reporter = SpyStatusReporter([])
     adapter = ScriptedViewerAdapter(
         [
@@ -775,7 +991,7 @@ def test_persistent_recording_ownership_close_failure_is_never_silent(
         status_reporter=reporter,
     )
     expected_message = (
-        r"failed to apply frame 0 from motion 1/1 \(walk\)"
+        r"failed to apply frame 0 from clip 1/1 \(walk\)"
         if fatal_session_failure
         else "failed to close background recorder"
     )
@@ -796,7 +1012,7 @@ def test_persistent_recording_ownership_close_failure_is_never_silent(
         assert "failed to close recording child" in str(error.value.__cause__)
         assert caught == []
 
-    recorder.record_selected_clip(0, motion)
+    recorder.record_selected_clip(0, next(motion.iter_clip_spans()))
     assert starts == 1
     assert recorder.status is RecordingStatus.RUNNING
     assert target.output_path.read_bytes() == b"partial"
@@ -842,7 +1058,7 @@ def test_fatal_session_failure_is_primary_when_recording_settlement_also_fails(
         pytest.warns(UserWarning),
         pytest.raises(
             ViewerError,
-            match=r"failed to apply frame 0 from motion 1/1 \(walk\)",
+            match=r"failed to apply frame 0 from clip 1/1 \(walk\)",
         ) as error,
     ):
         viewer.run()
@@ -869,7 +1085,7 @@ def test_invalid_elapsed_time_fails_before_actions_or_scene_mutation(
             ViewerTick(
                 elapsed_seconds=elapsed_seconds,
                 actions=(
-                    PlaybackAction.NEXT_MOTION,
+                    PlaybackAction.NEXT_CLIP,
                     PlaybackAction.RECORD_SELECTED_CLIP,
                 ),
             )
@@ -888,7 +1104,7 @@ def test_invalid_elapsed_time_fails_before_actions_or_scene_mutation(
         viewer.run()
 
     assert isinstance(error.value.__cause__, ValueError)
-    assert viewer.controller.selected_motion_index == 0
+    assert viewer.controller.selected_clip_index == 0
     assert viewer.controller.frame_position == 0.0
     assert recorder.requests == []
     assert scene.applications == []

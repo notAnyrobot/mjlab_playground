@@ -69,6 +69,35 @@ class ReferenceFrame:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ReferenceMotionClipSpan:
+    """One logical clip mapped into a packed reference motion."""
+
+    parent: ReferenceMotion
+    clip_id: int
+    start_frame: int
+    frame_count: int
+    fps: float
+
+    @property
+    def name(self) -> str | None:
+        """Decode this logical clip's name only when requested."""
+        if self.parent.clip_name_bytes is None:
+            return self.parent.name
+        return self.parent.clip_name(self.clip_id)
+
+    def to_packed_frame(self, local_frame_index: int) -> int:
+        """Map one validated clip-local frame index into the packed parent."""
+        if not isinstance(local_frame_index, int):
+            raise TypeError("local frame index must be an int")
+        if local_frame_index < 0 or local_frame_index >= self.frame_count:
+            raise IndexError(
+                f"local frame index {local_frame_index} out of range for "
+                f"{self.frame_count} frames"
+            )
+        return self.start_frame + local_frame_index
+
+
+@dataclass(frozen=True, kw_only=True)
 class ReferenceMotion:
     """Tensor-backed reference motion over packed frame tensors."""
 
@@ -408,6 +437,103 @@ class ReferenceMotion:
             if self.foot_contacts is not None
             else None,
         )
+
+    def iter_clip_spans(self) -> Iterable[ReferenceMotionClipSpan]:
+        """Iterate logical clips without materializing clip-local tensors."""
+        operational_metadata = (
+            self.clip_starts,
+            self.clip_lengths,
+            self.clip_fps,
+            self.clip_name_bytes,
+            self.clip_name_offsets,
+        )
+        if all(value is None for value in operational_metadata):
+            if self.root_pos.ndim < 1 or self.root_pos.shape[0] <= 0:
+                raise ValueError("reference motion must contain at least one frame")
+            fps = float(self.fps)
+            if fps <= 0.0 or not math.isfinite(fps):
+                raise ValueError("reference motion FPS must be positive and finite")
+            yield ReferenceMotionClipSpan(
+                parent=self,
+                clip_id=0,
+                start_frame=0,
+                frame_count=int(self.root_pos.shape[0]),
+                fps=fps,
+            )
+            return
+        if any(value is None for value in operational_metadata):
+            raise ValueError("operational clip metadata must be provided together")
+        assert self.clip_starts is not None
+        assert self.clip_lengths is not None
+        assert self.clip_fps is not None
+        assert self.clip_name_bytes is not None
+        assert self.clip_name_offsets is not None
+        integer_dtypes = (
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+            torch.uint8,
+        )
+        if (
+            self.clip_starts.ndim != 1
+            or self.clip_lengths.ndim != 1
+            or self.clip_starts.dtype not in integer_dtypes
+            or self.clip_lengths.dtype not in integer_dtypes
+        ):
+            raise ValueError("clip_starts and clip_lengths must be 1D integer tensors")
+        if self.clip_fps.ndim != 1:
+            raise ValueError("clip_fps must be a 1D tensor")
+        clip_count = self.clip_starts.numel()
+        if clip_count == 0:
+            raise ValueError("operational clip metadata must contain at least one clip")
+        if (
+            self.clip_lengths.numel() != clip_count
+            or self.clip_fps.numel() != clip_count
+        ):
+            raise ValueError("clip metadata counts must match")
+
+        clip_starts = [int(value) for value in self.clip_starts.tolist()]
+        clip_lengths = [int(value) for value in self.clip_lengths.tolist()]
+        clip_fps = [float(value) for value in self.clip_fps.tolist()]
+        if any(length <= 0 for length in clip_lengths):
+            raise ValueError("clip lengths must be positive")
+        if any(value <= 0.0 or not math.isfinite(value) for value in clip_fps):
+            raise ValueError("clip FPS values must be positive and finite")
+        validate_contiguous_clip_spans(
+            clip_starts=clip_starts,
+            clip_lengths=clip_lengths,
+            packed_frame_count=int(self.root_pos.shape[0]),
+        )
+
+        if (
+            self.clip_name_bytes.ndim != 1
+            or self.clip_name_bytes.dtype != torch.uint8
+            or self.clip_name_bytes.device.type != "cpu"
+        ):
+            raise ValueError("clip_name_bytes must be a 1D uint8 CPU tensor")
+        if (
+            self.clip_name_offsets.ndim != 1
+            or self.clip_name_offsets.dtype not in integer_dtypes
+            or self.clip_name_offsets.device.type != "cpu"
+        ):
+            raise ValueError("clip_name_offsets must be a 1D integer CPU tensor")
+        validate_compact_clip_names(
+            encoded_names=bytes(self.clip_name_bytes.tolist()),
+            offsets=[int(value) for value in self.clip_name_offsets.tolist()],
+            clip_count=clip_count,
+        )
+
+        for clip_id, (start_frame, frame_count, fps) in enumerate(
+            zip(clip_starts, clip_lengths, clip_fps, strict=True)
+        ):
+            yield ReferenceMotionClipSpan(
+                parent=self,
+                clip_id=clip_id,
+                start_frame=start_frame,
+                frame_count=frame_count,
+                fps=fps,
+            )
 
     def clip_name(self, clip_id: int) -> str:
         """Decode one clip's UTF-8 identity on demand."""

@@ -1,5 +1,10 @@
 from .motion_lib import MotionLib, MotionLibCfg
-from .motion_loader import ReferenceFrame, ReferenceMotion, ReferenceMotionState
+from .motion_loader import (
+    ReferenceFrame,
+    ReferenceMotion,
+    ReferenceMotionClipSpan,
+    ReferenceMotionState,
+)
 from .motion_manager import (
     ClipWeighting,
     MimicMotionManager,
@@ -19,6 +24,7 @@ __all__ = [
     "MotionManagerCfg",
     "ReferenceFrame",
     "ReferenceMotion",
+    "ReferenceMotionClipSpan",
     "ReferenceMotionState",
     "TimeSampling",
 ]

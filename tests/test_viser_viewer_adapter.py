@@ -38,8 +38,8 @@ class FakeViserControls:
             assert self.action_handler is not None
             for action in (
                 PlaybackAction.TOGGLE_PAUSE,
-                PlaybackAction.PREVIOUS_MOTION,
-                PlaybackAction.NEXT_MOTION,
+                PlaybackAction.PREVIOUS_CLIP,
+                PlaybackAction.NEXT_CLIP,
                 PlaybackAction.SLOWER,
                 PlaybackAction.FASTER,
                 PlaybackAction.RECORD_SELECTED_CLIP,
@@ -113,12 +113,21 @@ def test_production_viser_controls_map_every_common_playback_action() -> None:
 
     assert actions == [
         PlaybackAction.TOGGLE_PAUSE,
-        PlaybackAction.PREVIOUS_MOTION,
-        PlaybackAction.NEXT_MOTION,
+        PlaybackAction.PREVIOUS_CLIP,
+        PlaybackAction.NEXT_CLIP,
         PlaybackAction.SLOWER,
         PlaybackAction.FASTER,
         PlaybackAction.RECORD_SELECTED_CLIP,
         PlaybackAction.STOP,
+    ]
+    assert [label for label, _ in gui.buttons] == [
+        "Pause / Play",
+        "Previous clip",
+        "Next clip",
+        "Slower",
+        "Faster",
+        "Record selected clip",
+        "Stop",
     ]
     assert all(button.remove_calls == 1 for _, button in gui.buttons)
 
@@ -157,10 +166,10 @@ def test_production_viser_controls_hide_recording_when_disabled() -> None:
 
 def _snapshot(*, stop_requested: bool = False) -> ViewerSnapshot:
     return ViewerSnapshot(
-        status="Motion 1/1 | walk | playing",
-        selected_motion_index=0,
-        selected_motion_name="walk",
-        motion_count=1,
+        status="Clip 1/1 | walk | playing",
+        selected_clip_index=0,
+        selected_clip_name="walk",
+        clip_count=1,
         frame_index=0,
         frame_count=3,
         playback_speed=1.0,
@@ -199,8 +208,8 @@ def test_viser_factory_queues_typed_controls_and_syncs_authoritative_scene() -> 
         (),
         (
             PlaybackAction.TOGGLE_PAUSE,
-            PlaybackAction.PREVIOUS_MOTION,
-            PlaybackAction.NEXT_MOTION,
+            PlaybackAction.PREVIOUS_CLIP,
+            PlaybackAction.NEXT_CLIP,
             PlaybackAction.SLOWER,
             PlaybackAction.FASTER,
             PlaybackAction.RECORD_SELECTED_CLIP,

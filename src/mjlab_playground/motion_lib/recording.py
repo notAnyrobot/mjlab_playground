@@ -6,9 +6,12 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
 
 from mjlab_playground.motion_lib.motion_viewer import RecordingStatus
+
+if TYPE_CHECKING:
+    from mjlab_playground.motion_lib.motion_loader import ReferenceMotionClipSpan
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -22,6 +25,8 @@ class RecordingResult:
 
 @dataclass(frozen=True, kw_only=True)
 class RecordingTarget:
+    reference_motion_index: int
+    clip_id: int
     source_path: Path
     output_path: Path
 
@@ -32,15 +37,16 @@ class RecordingOutputPlan:
     targets: tuple[RecordingTarget, ...]
 
     def as_request(self) -> RecordingRequest:
-        """Bind planned outputs to the corresponding loaded motion indices."""
+        """Bind planned outputs to the corresponding loaded reference motions."""
         return RecordingRequest(
             targets=tuple(
                 RecordingRequestTarget(
-                    motion_index=motion_index,
+                    reference_motion_index=target.reference_motion_index,
+                    clip_id=target.clip_id,
                     source_path=target.source_path,
                     output_path=target.output_path,
                 )
-                for motion_index, target in enumerate(self.targets)
+                for target in self.targets
             )
         )
 
@@ -49,7 +55,8 @@ class RecordingOutputPlan:
 class RecordingRequestTarget:
     """One already-planned deterministic recording target."""
 
-    motion_index: int
+    reference_motion_index: int
+    clip_id: int
     source_path: Path
     output_path: Path
 
@@ -108,12 +115,27 @@ class SubprocessBackgroundRecorder:
     def error(self) -> str | None:
         return self._error
 
-    def record_selected_clip(self, motion_index: int, motion: Any) -> None:
-        del motion
+    def record_selected_clip(
+        self,
+        reference_motion_index: int,
+        clip: ReferenceMotionClipSpan,
+    ) -> None:
         if self._process is not None:
             self._error = f"recording already running: {self._output_path}"
             return
-        target = self._targets[motion_index]
+        identity = (reference_motion_index, clip.clip_id)
+        matching_targets = tuple(
+            target
+            for target in self._targets
+            if (target.reference_motion_index, target.clip_id) == identity
+        )
+        if len(matching_targets) != 1:
+            raise ValueError(
+                "expected exactly one recording target for reference motion "
+                f"{reference_motion_index}, clip {clip.clip_id}; "
+                f"found {len(matching_targets)}"
+            )
+        target = matching_targets[0]
         request = RecordingRequest(targets=(target,))
         self._output_path = target.output_path
         self._error = None
@@ -221,7 +243,7 @@ def create_subprocess_background_recorder(
     device: str,
     process_launcher: Callable[[list[str]], BackgroundProcess] | None = None,
 ) -> SubprocessBackgroundRecorder:
-    """Create isolated background recording that invokes deterministic headless mode."""
+    """Create isolated background recording for one captured logical clip."""
     if process_launcher is None:
 
         def launch_process(command: list[str]) -> BackgroundProcess:
@@ -234,8 +256,8 @@ def create_subprocess_background_recorder(
         command = [
             sys.executable,
             "-m",
-            "mjlab_playground.motion_lib.scripts.launch_motion_viewer",
-            "--motion-files",
+            "mjlab_playground.motion_lib.scripts._record_selected_clip",
+            "--motion-file",
             str(target.source_path),
             "--format",
             motion_format,
@@ -245,10 +267,10 @@ def create_subprocess_background_recorder(
             robot,
             "--device",
             device,
-            "--headless",
-            "--record-video",
-            "--output-dir",
-            str(target.output_path.parent),
+            "--clip-id",
+            str(target.clip_id),
+            "--output",
+            str(target.output_path),
         ]
         return process_launcher(command)
 
@@ -301,34 +323,62 @@ class DeterministicRecorder:
         """Record every requested clip from frame zero through its final frame."""
         if not request.targets:
             raise ValueError("recording request must contain at least one target")
+        resolved_targets: list[tuple[RecordingRequestTarget, Any]] = []
         for target in request.targets:
-            if target.motion_index < 0 or target.motion_index >= len(motions):
-                raise IndexError(f"motion_index out of range: {target.motion_index}")
+            if (
+                target.reference_motion_index < 0
+                or target.reference_motion_index >= len(motions)
+            ):
+                raise IndexError(
+                    "reference_motion_index out of range: "
+                    f"{target.reference_motion_index}"
+                )
+            motion = motions[target.reference_motion_index]
+            span = next(
+                (
+                    candidate
+                    for candidate in motion.iter_clip_spans()
+                    if candidate.clip_id == target.clip_id
+                ),
+                None,
+            )
+            if span is None:
+                raise IndexError(
+                    f"clip_id {target.clip_id} out of range for reference motion "
+                    f"{target.reference_motion_index}"
+                )
+            resolved_targets.append((target, span))
 
         reporter = status_reporter or self._status_reporter
         renderer = self._renderer_factory()
         results: list[RecordingResult] = []
         try:
-            for target_number, target in enumerate(request.targets, start=1):
-                motion = motions[target.motion_index]
-                motion_name = _motion_name(motion)
-                motion_context = (
-                    f"motion {target_number}/{len(request.targets)} ({motion_name})"
+            for target_number, (target, span) in enumerate(resolved_targets, start=1):
+                motion = span.parent
+                clip_name = span.name or _motion_name(motion)
+                clip_context = (
+                    f"clip {target_number}/{len(request.targets)} ({clip_name})"
                 )
-                frame_count = _frame_count(motion)
-                fps = _motion_fps(motion)
+                frame_count = span.frame_count
+                fps = span.fps
                 attachment = self._attachment_factory()
                 _report(
                     reporter,
                     f"Recording {target_number}/{len(request.targets)}: "
-                    f"{motion_name} -> {target.output_path}",
+                    f"{clip_name} -> {target.output_path}",
                 )
                 attachment.start(target.output_path, fps=fps)
                 try:
-                    for frame_index in range(frame_count):
-                        frame_context = f"frame {frame_index + 1}/{frame_count} for {motion_context}"
+                    for local_frame_index in range(frame_count):
+                        frame_context = (
+                            f"frame {local_frame_index + 1}/{frame_count} "
+                            f"for {clip_context}"
+                        )
                         try:
-                            self._scene.apply_reference_frame(motion, frame_index)
+                            self._scene.apply_reference_frame(
+                                motion,
+                                span.to_packed_frame(local_frame_index),
+                            )
                         except Exception as exc:
                             raise DeterministicRecordingError(
                                 f"failed to apply {frame_context}"
@@ -347,14 +397,14 @@ class DeterministicRecorder:
                             ) from exc
                         _report(
                             reporter,
-                            f"Recording {motion_name}: frame "
-                            f"{frame_index + 1}/{frame_count}",
+                            f"Recording {clip_name}: frame "
+                            f"{local_frame_index + 1}/{frame_count}",
                         )
                     try:
                         result = attachment.stop()
                     except Exception as exc:
                         raise DeterministicRecordingError(
-                            f"failed to write recording for {motion_context} "
+                            f"failed to write recording for {clip_context} "
                             f"to {target.output_path}"
                         ) from exc
                 except Exception:
@@ -519,28 +569,11 @@ def _report(reporter: Callable[[str], None] | None, message: str) -> None:
         reporter(message)
 
 
-def _frame_count(motion: Any) -> int:
-    try:
-        frame_count = int(motion.root_pos.shape[0])
-    except AttributeError as exc:
-        raise TypeError("reference motion must expose root_pos frames") from exc
-    if frame_count <= 0:
-        raise ValueError("reference motion must contain at least one frame")
-    return frame_count
-
-
 def _motion_name(motion: Any) -> str:
     name = getattr(motion, "name", None)
     if name:
         return str(name)
     return "unnamed"
-
-
-def _motion_fps(motion: Any) -> float:
-    fps = float(getattr(motion, "fps", 30.0))
-    if fps <= 0.0 or not math.isfinite(fps):
-        raise ValueError("reference motion fps must be positive and finite")
-    return fps
 
 
 def _write_video_with_mediapy(path: Path, frames: Sequence[Any], *, fps: float) -> None:
@@ -555,6 +588,7 @@ def plan_recording_outputs(
     timestamp: str | None = None,
     output_dir: str | Path | None = None,
     motion_names: Sequence[str] | None = None,
+    reference_motions: Sequence[Any] | None = None,
 ) -> RecordingOutputPlan:
     source = Path(motion_source)
     if source.is_file():
@@ -562,7 +596,7 @@ def plan_recording_outputs(
         motion_paths = [source]
     elif source.is_dir():
         motion_dir = source
-        if motion_names is None:
+        if motion_names is None and reference_motions is None:
             raise ValueError(
                 "motion_names are required when planning recordings for a directory"
             )
@@ -590,14 +624,75 @@ def plan_recording_outputs(
         if output_dir is not None
         else (motion_dir.parent / "renderings" / run_timestamp)
     )
-    planned_output_dir.mkdir(parents=True, exist_ok=True)
-    return RecordingOutputPlan(
-        output_dir=planned_output_dir,
-        targets=tuple(
+    if reference_motions is None:
+        targets = tuple(
             RecordingTarget(
+                reference_motion_index=reference_motion_index,
+                clip_id=0,
                 source_path=motion_path,
                 output_path=planned_output_dir / f"{motion_path.stem}.mp4",
             )
-            for motion_path in motion_paths
-        ),
+            for reference_motion_index, motion_path in enumerate(motion_paths)
+        )
+    else:
+        if motion_names is not None:
+            raise ValueError(
+                "reference_motions and motion_names cannot both be provided"
+            )
+        loaded_motions = tuple(reference_motions)
+        if not loaded_motions:
+            raise ValueError("reference_motions must contain at least one value")
+        motion_paths = _loaded_reference_motion_paths(source, loaded_motions)
+        targets = tuple(
+            RecordingTarget(
+                reference_motion_index=reference_motion_index,
+                clip_id=span.clip_id,
+                source_path=motion_path,
+                output_path=planned_output_dir
+                / f"{Path(span.name or motion_path.name).stem}.mp4",
+            )
+            for reference_motion_index, (motion, motion_path) in enumerate(
+                zip(loaded_motions, motion_paths, strict=True)
+            )
+            for span in motion.iter_clip_spans()
+        )
+
+    output_paths = [target.output_path for target in targets]
+    if len(set(output_paths)) != len(output_paths):
+        duplicate_names = sorted(
+            path.name for path in set(output_paths) if output_paths.count(path) > 1
+        )
+        raise ValueError(
+            "duplicate recording output names: " + ", ".join(duplicate_names)
+        )
+
+    planned_output_dir.mkdir(parents=True, exist_ok=True)
+    return RecordingOutputPlan(
+        output_dir=planned_output_dir,
+        targets=targets,
     )
+
+
+def _loaded_reference_motion_paths(
+    source: Path,
+    reference_motions: Sequence[Any],
+) -> tuple[Path, ...]:
+    if source.is_file():
+        if len(reference_motions) != 1:
+            raise ValueError(
+                "a motion file must load exactly one reference motion for recording"
+            )
+        return (source,)
+
+    paths: list[Path] = []
+    for motion in reference_motions:
+        name = getattr(motion, "name", None)
+        if not name:
+            raise ValueError("loaded reference motions must expose names for recording")
+        path = source / Path(str(name)).name
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Loaded motion {str(name)!r} was not found under {source}"
+            )
+        paths.append(path)
+    return tuple(paths)

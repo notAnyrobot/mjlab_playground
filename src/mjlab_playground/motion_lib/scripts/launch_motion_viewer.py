@@ -290,7 +290,11 @@ def verify_motion_viewer_path(
         ) from exc
 
     try:
-        scene_adapter.apply_reference_frame(motions[0], 0)
+        first_span = next(motions[0].iter_clip_spans())
+        scene_adapter.apply_reference_frame(
+            first_span.parent,
+            first_span.to_packed_frame(0),
+        )
     except ValueError as exc:
         if robot == "astro" and (
             "DOF count" in str(exc) or "DOFs from robot joint order" in str(exc)
@@ -305,16 +309,6 @@ def verify_motion_viewer_path(
         raise MotionViewerVerificationError(
             f"Failed to apply one reference motion frame to {robot} scene: {exc}"
         ) from exc
-
-
-def _recording_motion_names(motions: Sequence[Any]) -> list[str]:
-    names = []
-    for motion in motions:
-        name = getattr(motion, "name", None)
-        if not name:
-            raise ValueError("loaded reference motions must expose names for recording")
-        names.append(str(name))
-    return names
 
 
 def _display_is_available() -> bool:
@@ -387,7 +381,7 @@ def main(
         output_plan = recording_module.plan_recording_outputs(
             args.motion_files,
             output_dir=args.output_dir,
-            motion_names=_recording_motion_names(motions),
+            reference_motions=motions,
         )
         deterministic_recorder = deterministic_recorder_factory(
             scene,
@@ -411,7 +405,7 @@ def main(
         output_plan = recording_module.plan_recording_outputs(
             args.motion_files,
             output_dir=args.output_dir,
-            motion_names=_recording_motion_names(motions),
+            reference_motions=motions,
         )
         background_recorder = background_recorder_factory(
             targets=output_plan.as_request().targets,

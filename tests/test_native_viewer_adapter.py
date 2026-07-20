@@ -54,10 +54,10 @@ class FakePassiveHandle:
 
 def _snapshot(*, stop_requested: bool = False) -> ViewerSnapshot:
     return ViewerSnapshot(
-        status="Motion 1/1 | walk | playing",
-        selected_motion_index=0,
-        selected_motion_name="walk",
-        motion_count=1,
+        status="Clip 1/1 | walk | playing",
+        selected_clip_index=0,
+        selected_clip_name="walk",
+        clip_count=1,
         frame_index=0,
         frame_count=3,
         playback_speed=1.0,
@@ -113,7 +113,7 @@ def test_native_factory_drives_typed_actions_and_authoritative_scene_sync() -> N
     assert [tick.actions for tick in ticks] == [
         (),
         (PlaybackAction.TOGGLE_PAUSE,),
-        (PlaybackAction.NEXT_MOTION,),
+        (PlaybackAction.NEXT_CLIP,),
         (PlaybackAction.STOP,),
     ]
     assert scene.display_syncs == 3

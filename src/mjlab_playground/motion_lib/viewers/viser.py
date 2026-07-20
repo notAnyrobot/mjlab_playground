@@ -29,8 +29,8 @@ class ViserPlaybackControls:
         with gui.add_folder("Reference motion"):
             self._status = gui.add_html("Waiting for playback")
             self._add_button(gui, "Pause / Play", PlaybackAction.TOGGLE_PAUSE)
-            self._add_button(gui, "Previous motion", PlaybackAction.PREVIOUS_MOTION)
-            self._add_button(gui, "Next motion", PlaybackAction.NEXT_MOTION)
+            self._add_button(gui, "Previous clip", PlaybackAction.PREVIOUS_CLIP)
+            self._add_button(gui, "Next clip", PlaybackAction.NEXT_CLIP)
             self._add_button(gui, "Slower", PlaybackAction.SLOWER)
             self._add_button(gui, "Faster", PlaybackAction.FASTER)
             if recording_enabled:

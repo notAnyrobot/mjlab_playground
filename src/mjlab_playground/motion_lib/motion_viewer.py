@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence, TextIO
 
 if TYPE_CHECKING:
+    from mjlab_playground.motion_lib.motion_loader import ReferenceMotionClipSpan
     from mjlab_playground.motion_lib.recording import RecordingRequest, RecordingResult
 
 PLAYBACK_SPEEDS = (0.1, 0.2, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
@@ -21,8 +22,8 @@ class PlaybackAction(Enum):
     """Viewer-independent user intent submitted with one session tick."""
 
     TOGGLE_PAUSE = "toggle_pause"
-    PREVIOUS_MOTION = "previous_motion"
-    NEXT_MOTION = "next_motion"
+    PREVIOUS_CLIP = "previous_clip"
+    NEXT_CLIP = "next_clip"
     SLOWER = "slower"
     FASTER = "faster"
     RECORD_SELECTED_CLIP = "record_selected_clip"
@@ -52,9 +53,9 @@ class ViewerSnapshot:
     """Immutable presentation state returned after one core update."""
 
     status: str
-    selected_motion_index: int
-    selected_motion_name: str
-    motion_count: int
+    selected_clip_index: int
+    selected_clip_name: str
+    clip_count: int
     frame_index: int
     frame_count: int
     playback_speed: float
@@ -93,7 +94,11 @@ class BackgroundRecorder(Protocol):
         """Return the latest presentation-ready recording status."""
         ...
 
-    def record_selected_clip(self, motion_index: int, motion: Any) -> None:
+    def record_selected_clip(
+        self,
+        reference_motion_index: int,
+        clip: ReferenceMotionClipSpan,
+    ) -> None:
         """Request deterministic recording of the selected reference clip."""
         ...
 
@@ -143,11 +148,11 @@ class ViewerError(RuntimeError):
 class PlaybackController:
     """Pure playback state for source-agnostic reference motion clips."""
 
-    def __init__(self, *, motion_count: int) -> None:
-        if motion_count <= 0:
-            raise ValueError("motion_count must be positive")
-        self.motion_count = motion_count
-        self.selected_motion_index = 0
+    def __init__(self, *, clip_count: int) -> None:
+        if clip_count <= 0:
+            raise ValueError("clip_count must be positive")
+        self.clip_count = clip_count
+        self.selected_clip_index = 0
         self.frame_position = 0.0
         self.paused = False
         self.playback_speed_index = DEFAULT_PLAYBACK_SPEED_INDEX
@@ -165,16 +170,12 @@ class PlaybackController:
     def decrease_speed(self) -> None:
         self.playback_speed_index = max(self.playback_speed_index - 1, 0)
 
-    def select_next_motion(self) -> None:
-        self.selected_motion_index = (
-            self.selected_motion_index + 1
-        ) % self.motion_count
+    def select_next_clip(self) -> None:
+        self.selected_clip_index = (self.selected_clip_index + 1) % self.clip_count
         self.reset_frame()
 
-    def select_previous_motion(self) -> None:
-        self.selected_motion_index = (
-            self.selected_motion_index - 1
-        ) % self.motion_count
+    def select_previous_clip(self) -> None:
+        self.selected_clip_index = (self.selected_clip_index - 1) % self.clip_count
         self.reset_frame()
 
     def reset_frame(self) -> None:
@@ -258,8 +259,14 @@ class MotionViewer:
         if not motions:
             raise ValueError("MotionViewer requires at least one reference motion")
         self.motions = list(motions)
+        self._clip_addresses: list[tuple[int, ReferenceMotionClipSpan]] = [
+            (reference_motion_index, clip)
+            for reference_motion_index, motion in enumerate(self.motions)
+            for clip in motion.iter_clip_spans()
+        ]
+        self.clips = [clip for _, clip in self._clip_addresses]
         self._motion_scene = motion_scene
-        self.controller = PlaybackController(motion_count=len(self.motions))
+        self.controller = PlaybackController(clip_count=len(self.clips))
         self._viewer_adapter = viewer_adapter
         self._background_recorder = background_recorder
         self._deterministic_recorder = deterministic_recorder
@@ -267,8 +274,8 @@ class MotionViewer:
         self._stop_requested = False
 
     @property
-    def selected_motion(self) -> Any:
-        return self.motions[self.controller.selected_motion_index]
+    def selected_clip(self) -> ReferenceMotionClipSpan:
+        return self.clips[self.controller.selected_clip_index]
 
     def run(self) -> None:
         """Run one presentation-agnostic interactive playback session."""
@@ -409,23 +416,23 @@ class MotionViewer:
 
         if not self._stop_requested:
             self.controller.advance(
-                frame_count=self._frame_count(self.selected_motion),
-                frames=elapsed_seconds * self._motion_fps(self.selected_motion),
+                frame_count=self.selected_clip.frame_count,
+                frames=elapsed_seconds * self.selected_clip.fps,
             )
-            frame_count = self._frame_count(self.selected_motion)
+            frame_count = self.selected_clip.frame_count
             frame_index = self.controller.current_frame_index(frame_count=frame_count)
             try:
                 self._motion_scene.apply_reference_frame(
-                    self.selected_motion,
-                    frame_index,
+                    self.selected_clip.parent,
+                    self.selected_clip.to_packed_frame(frame_index),
                 )
             except Exception as exc:
                 self._stop_requested = True
-                motion_number = self.controller.selected_motion_index + 1
-                motion_name = self._motion_name(self.selected_motion)
+                clip_number = self.controller.selected_clip_index + 1
+                clip_name = self._clip_name(self.selected_clip)
                 raise ViewerError(
-                    f"failed to apply frame {frame_index} from motion "
-                    f"{motion_number}/{len(self.motions)} ({motion_name})"
+                    f"failed to apply frame {frame_index} from clip "
+                    f"{clip_number}/{len(self.clips)} ({clip_name})"
                 ) from exc
 
         return self._session_snapshot()
@@ -433,28 +440,29 @@ class MotionViewer:
     def _apply_session_action(self, action: PlaybackAction) -> None:
         if action is PlaybackAction.TOGGLE_PAUSE:
             self.controller.toggle_pause()
-        elif action is PlaybackAction.PREVIOUS_MOTION:
-            self.controller.select_previous_motion()
-        elif action is PlaybackAction.NEXT_MOTION:
-            self.controller.select_next_motion()
+        elif action is PlaybackAction.PREVIOUS_CLIP:
+            self.controller.select_previous_clip()
+        elif action is PlaybackAction.NEXT_CLIP:
+            self.controller.select_next_clip()
         elif action is PlaybackAction.SLOWER:
             self.controller.decrease_speed()
         elif action is PlaybackAction.FASTER:
             self.controller.increase_speed()
         elif action is PlaybackAction.RECORD_SELECTED_CLIP:
             if self._background_recorder is not None:
-                motion_index = self.controller.selected_motion_index
+                clip_index = self.controller.selected_clip_index
+                reference_motion_index, clip = self._clip_addresses[clip_index]
                 self._background_recorder.record_selected_clip(
-                    motion_index,
-                    self.motions[motion_index],
+                    reference_motion_index,
+                    clip,
                 )
         elif action is PlaybackAction.STOP:
             self._stop_requested = True
 
     def _session_snapshot(self) -> ViewerSnapshot:
-        motion_index = self.controller.selected_motion_index
-        motion = self.selected_motion
-        frame_count = self._frame_count(motion)
+        clip_index = self.controller.selected_clip_index
+        clip = self.selected_clip
+        frame_count = clip.frame_count
         frame_index = self.controller.current_frame_index(frame_count=frame_count)
         recording_status = RecordingStatus.DISABLED
         recording_output_path = None
@@ -473,9 +481,9 @@ class MotionViewer:
             status = f"{status} | recording {recording_context}"
         return ViewerSnapshot(
             status=status,
-            selected_motion_index=motion_index,
-            selected_motion_name=self._motion_name(motion),
-            motion_count=len(self.motions),
+            selected_clip_index=clip_index,
+            selected_clip_name=self._clip_name(clip),
+            clip_count=len(self.clips),
             frame_index=frame_index,
             frame_count=frame_count,
             playback_speed=self.controller.playback_speed,
@@ -487,15 +495,15 @@ class MotionViewer:
         )
 
     def _playback_status(self) -> str:
-        motion_index = self.controller.selected_motion_index
-        motion = self.selected_motion
-        frame_count = self._frame_count(motion)
+        clip_index = self.controller.selected_clip_index
+        clip = self.selected_clip
+        frame_count = clip.frame_count
         frame_index = self.controller.current_frame_index(frame_count=frame_count)
         state = "paused" if self.controller.paused else "playing"
         percent = 100.0 * frame_index / frame_count
         return (
-            f"Motion {motion_index + 1}/{len(self.motions)} "
-            f"| {self._motion_name(motion)} "
+            f"Clip {clip_index + 1}/{len(self.clips)} "
+            f"| {self._clip_name(clip)} "
             f"| {self._progress_bar(frame_index=frame_index, frame_count=frame_count)} "
             f"{frame_index}/{frame_count} ({percent:.1f}%) "
             f"| speed {self.controller.playback_speed:g}x "
@@ -503,18 +511,8 @@ class MotionViewer:
         )
 
     @staticmethod
-    def _frame_count(motion: Any) -> int:
-        try:
-            frame_count = int(motion.root_pos.shape[0])
-        except AttributeError as exc:
-            raise TypeError("reference motion must expose root_pos frames") from exc
-        if frame_count <= 0:
-            raise ValueError("reference motion must contain at least one frame")
-        return frame_count
-
-    @staticmethod
-    def _motion_name(motion: Any) -> str:
-        name = getattr(motion, "name", None)
+    def _clip_name(clip: ReferenceMotionClipSpan) -> str:
+        name = clip.name
         if name:
             return str(name)
         return "unnamed"
@@ -525,10 +523,3 @@ class MotionViewer:
         filled = max(0, min(STATUS_PROGRESS_BAR_WIDTH, filled))
         empty = STATUS_PROGRESS_BAR_WIDTH - filled
         return f"[{'=' * filled}{'-' * empty}]"
-
-    @staticmethod
-    def _motion_fps(motion: Any) -> float:
-        fps = float(getattr(motion, "fps", 30.0))
-        if fps <= 0.0 or not math.isfinite(fps):
-            raise ValueError("reference motion fps must be positive and finite")
-        return fps

@@ -30,6 +30,7 @@ def _load_motion_loader_module() -> ModuleType:
 _motion_loader = _load_motion_loader_module()
 ReferenceFrame = _motion_loader.ReferenceFrame
 ReferenceMotion = _motion_loader.ReferenceMotion
+ReferenceMotionClipSpan = _motion_loader.ReferenceMotionClipSpan
 
 
 def _identity_root_rot(num_frames: int) -> torch.Tensor:
@@ -199,6 +200,196 @@ def test_reference_motion_get_frame_extracts_single_reference_frame() -> None:
     torch.testing.assert_close(frame.body_contacts, motion.body_contacts[2])
     torch.testing.assert_close(frame.foot_contacts, motion.foot_contacts[2])
     assert not hasattr(frame, "clip_starts")
+
+
+def test_reference_motion_iter_clip_spans_maps_one_implicit_clip() -> None:
+    motion = ReferenceMotion(
+        name="walk.npz",
+        fps=60.0,
+        root_pos=torch.arange(12, dtype=torch.float32).reshape(4, 3),
+        root_rot=_identity_root_rot(4),
+        dof_pos=torch.arange(8, dtype=torch.float32).reshape(4, 2),
+    )
+
+    spans = list(motion.iter_clip_spans())
+
+    assert len(spans) == 1
+    span = spans[0]
+    assert isinstance(span, ReferenceMotionClipSpan)
+    assert span.parent is motion
+    assert span.clip_id == 0
+    assert span.start_frame == 0
+    assert span.frame_count == 4
+    assert span.fps == 60.0
+    assert span.name == "walk.npz"
+    assert span.to_packed_frame(0) == 0
+    assert span.to_packed_frame(3) == 3
+    torch.testing.assert_close(
+        span.parent.get_frame(span.to_packed_frame(3)).root_pos,
+        torch.tensor([9.0, 10.0, 11.0]),
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        span.clip_id = 1
+
+
+@pytest.mark.parametrize("local_frame", [-1, 4])
+def test_reference_motion_clip_span_rejects_out_of_range_local_frames(
+    local_frame: int,
+) -> None:
+    motion = ReferenceMotion(
+        root_pos=torch.zeros(4, 3),
+        root_rot=_identity_root_rot(4),
+        dof_pos=torch.zeros(4, 2),
+    )
+    span = next(motion.iter_clip_spans())
+
+    with pytest.raises(
+        IndexError,
+        match=rf"local frame index {local_frame} out of range for 4 frames",
+    ):
+        span.to_packed_frame(local_frame)
+
+
+def test_reference_motion_iter_clip_spans_preserves_packaged_metadata_order() -> None:
+    first = _rich_one_clip(name="walk.npz", frames=3)
+    second = _rich_one_clip(name="turn-测试.npz", frames=4, value_offset=10.0)
+    package = ReferenceMotion.from_clips([first, second])
+
+    spans = list(package.iter_clip_spans())
+
+    assert [span.parent is package for span in spans] == [True, True]
+    assert [span.clip_id for span in spans] == [0, 1]
+    assert [span.start_frame for span in spans] == [0, 3]
+    assert [span.frame_count for span in spans] == [3, 4]
+    assert [span.fps for span in spans] == [50.0, 50.0]
+    assert [span.name for span in spans] == ["walk.npz", "turn-测试.npz"]
+    assert spans[0].to_packed_frame(2) == 2
+    assert spans[1].to_packed_frame(0) == 3
+    assert spans[1].to_packed_frame(3) == 6
+    torch.testing.assert_close(
+        package.get_frame(spans[1].to_packed_frame(3)).root_pos,
+        torch.full((3,), 13.0),
+    )
+
+
+@pytest.mark.parametrize(
+    ("metadata", "message"),
+    [
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([], dtype=torch.int64),
+                "clip_lengths": torch.tensor([], dtype=torch.int64),
+                "clip_fps": torch.tensor([], dtype=torch.float32),
+                "clip_name_bytes": torch.tensor([], dtype=torch.uint8),
+                "clip_name_offsets": torch.tensor([0]),
+            },
+            "must contain at least one clip",
+            id="empty",
+        ),
+        pytest.param(
+            {"clip_lengths": None},
+            "operational clip metadata must be provided together",
+            id="partial",
+        ),
+        pytest.param(
+            {"clip_lengths": torch.tensor([3])},
+            "clip metadata counts must match",
+            id="count-mismatch",
+        ),
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([0, 4]),
+                "clip_lengths": torch.tensor([3, 3]),
+            },
+            "clip spans must be contiguous",
+            id="gap",
+        ),
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([0, 2]),
+                "clip_lengths": torch.tensor([3, 4]),
+            },
+            "clip spans must be contiguous",
+            id="overlap",
+        ),
+        pytest.param(
+            {"clip_lengths": torch.tensor([3, 5])},
+            "clip spans must cover packed frame count 7, got 8",
+            id="out-of-bounds",
+        ),
+        pytest.param(
+            {
+                "clip_starts": torch.tensor([0, 3]),
+                "clip_lengths": torch.tensor([3, 0]),
+            },
+            "clip lengths must be positive",
+            id="nonpositive-length",
+        ),
+        pytest.param(
+            {"clip_fps": torch.tensor([50.0, 0.0])},
+            "clip FPS values must be positive and finite",
+            id="nonpositive-fps",
+        ),
+        pytest.param(
+            {"clip_name_offsets": torch.tensor([0, 8])},
+            "clip_name_offsets must contain one more entry than the clip count",
+            id="name-count",
+        ),
+        pytest.param(
+            {
+                "clip_name_bytes": torch.tensor(
+                    list(b"walk.npz") + [0xFF], dtype=torch.uint8
+                ),
+                "clip_name_offsets": torch.tensor([0, 8, 9]),
+            },
+            "clip 1 name is not valid UTF-8",
+            id="name-utf8",
+        ),
+    ],
+)
+def test_reference_motion_iter_clip_spans_lazily_rejects_invalid_metadata(
+    metadata: dict[str, torch.Tensor | None],
+    message: str,
+) -> None:
+    package = ReferenceMotion.from_clips(
+        [
+            _rich_one_clip(name="walk.npz", frames=3),
+            _rich_one_clip(name="turn.npz", frames=4, value_offset=10.0),
+        ]
+    )
+
+    invalid_package = dataclasses.replace(package, **metadata)
+
+    with pytest.raises(ValueError, match=message):
+        list(invalid_package.iter_clip_spans())
+
+
+@pytest.mark.parametrize(
+    ("frame_count", "fps", "message"),
+    [
+        pytest.param(0, 50.0, "must contain at least one frame", id="empty"),
+        pytest.param(
+            3,
+            0.0,
+            "reference motion FPS must be positive and finite",
+            id="nonpositive-fps",
+        ),
+    ],
+)
+def test_reference_motion_iter_clip_spans_lazily_validates_implicit_span(
+    frame_count: int,
+    fps: float,
+    message: str,
+) -> None:
+    motion = ReferenceMotion(
+        fps=fps,
+        root_pos=torch.zeros(frame_count, 3),
+        root_rot=_identity_root_rot(frame_count),
+        dof_pos=torch.zeros(frame_count, 2),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        list(motion.iter_clip_spans())
 
 
 @pytest.mark.parametrize("frame_index", [-1, 4])

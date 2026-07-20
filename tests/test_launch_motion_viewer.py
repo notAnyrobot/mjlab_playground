@@ -11,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from mjlab_playground.motion_lib import ReferenceMotion, ReferenceMotionClipSpan
 from mjlab_playground.motion_lib.motion_viewer import (
     PlaybackAction,
     RecordingStatus,
@@ -52,10 +53,29 @@ parse_args = _launch_motion_viewer.parse_args
 
 
 class FakeReferenceMotion:
-    def __init__(self, frame_count: int, marker: float) -> None:
+    def __init__(
+        self,
+        frame_count: int,
+        marker: float,
+        *,
+        name: str = "motion",
+        fps: float = 30.0,
+    ) -> None:
+        self.name = name
+        self.fps = fps
+        self.clip_name_bytes = None
         self.root_pos = torch.full((frame_count, 3), marker)
         self.root_rot = torch.zeros(frame_count, 4)
         self.dof_pos = torch.zeros(frame_count, 29)
+
+    def iter_clip_spans(self):
+        yield ReferenceMotionClipSpan(
+            parent=self,  # type: ignore[arg-type]
+            clip_id=0,
+            start_frame=0,
+            frame_count=int(self.root_pos.shape[0]),
+            fps=self.fps,
+        )
 
 
 class FakeSceneAdapter:
@@ -75,7 +95,7 @@ def test_terminal_status_reporter_keeps_status_on_one_terminal_line() -> None:
     stream = io.StringIO()
     reporter = TerminalStatusReporter(stream=stream, max_width=80)
     long_status = (
-        "Motion 1/32 | a_very_long_reference_motion_name | "
+        "Clip 1/32 | a_very_long_reference_motion_name | "
         "[===-----------------] 313/2526 (12.4%) | speed 1x | playing | "
         "camera distance=2 elevation=-19.44 azimuth=11.94"
     )
@@ -83,7 +103,7 @@ def test_terminal_status_reporter_keeps_status_on_one_terminal_line() -> None:
     reporter(long_status)
 
     rendered = stream.getvalue()
-    assert rendered.startswith("\rMotion 1/32 | ")
+    assert rendered.startswith("\rClip 1/32 | ")
     assert rendered.endswith("distance=2 elevation=-19.44 azimuth=11.94")
     assert "\n" not in rendered
     assert len(rendered.removeprefix("\r")) == 80
@@ -190,6 +210,22 @@ def test_motion_viewer_cli_accepts_headless_batch_recording_options() -> None:
 
     assert args.headless is True
     assert args.record_video is True
+
+
+def test_motion_viewer_cli_exposes_no_single_clip_headless_selector() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args(
+            [
+                "--motion-files",
+                "/tmp/package.npz",
+                "--headless",
+                "--record-video",
+                "--clip-id",
+                "4",
+            ]
+        )
+
+    assert exc_info.value.code == 2
 
 
 def test_motion_viewer_cli_rejects_smoke_test_with_recording() -> None:
@@ -437,7 +473,7 @@ def test_motion_viewer_main_injects_background_recorder_into_core(
     motion_path = tmp_path / "walk.npz"
     output_dir = tmp_path / "custom-videos"
     motion_path.write_bytes(b"motion")
-    motion = SimpleNamespace(name="walk.npz", root_pos=np.zeros((2, 3)), fps=30.0)
+    motion = FakeReferenceMotion(2, 0.0, name="walk.npz", fps=30.0)
     scene = FakeSceneAdapter()
     calls: dict[str, object] = {}
 
@@ -458,8 +494,8 @@ def test_motion_viewer_main_injects_background_recorder_into_core(
         def close(self) -> None:
             pass
 
-        def record_selected_clip(self, motion_index, selected_motion) -> None:
-            calls["record"] = (motion_index, selected_motion)
+        def record_selected_clip(self, clip_index, selected_clip) -> None:
+            calls["record"] = (clip_index, selected_clip)
 
     recorder = FakeBackgroundRecorder()
 
@@ -507,7 +543,10 @@ def test_motion_viewer_main_injects_background_recorder_into_core(
     assert factory_kwargs["device"] == "cpu"
     _, adapter_kwargs = calls["adapter_factory"]
     assert adapter_kwargs["recording_enabled"] is True
-    assert calls["record"] == (0, motion)
+    recorded_clip_index, recorded_clip = calls["record"]
+    assert recorded_clip_index == 0
+    assert recorded_clip.parent is motion
+    assert recorded_clip.clip_id == 0
 
 
 def test_motion_viewer_main_records_headless_batch_without_a_viewer_adapter(
@@ -522,8 +561,8 @@ def test_motion_viewer_main_records_headless_batch_without_a_viewer_adapter(
     scene = FakeSceneAdapter()
 
     motions = [
-        SimpleNamespace(name="jump.npz"),
-        SimpleNamespace(name="walk.npz"),
+        FakeReferenceMotion(1, 1.0, name="jump.npz"),
+        FakeReferenceMotion(1, 2.0, name="walk.npz"),
     ]
 
     class FakeDeterministicRecorder:
@@ -561,6 +600,101 @@ def test_motion_viewer_main_records_headless_batch_without_a_viewer_adapter(
     built_scene, recorder_kwargs = calls["recorder_factory"]
     assert built_scene is scene
     assert recorder_kwargs["status_reporter"] is not None
+
+
+def test_motion_viewer_main_records_every_logical_clip_in_a_35_clip_package(
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "package.npz"
+    package_path.write_bytes(b"motion")
+    clip_names = [f"clip-{clip_id:02d}.npz" for clip_id in range(35)]
+    encoded_names = "".join(clip_names).encode()
+    name_offsets = [0]
+    for name in clip_names:
+        name_offsets.append(name_offsets[-1] + len(name.encode()))
+    package = ReferenceMotion(
+        name=package_path.name,
+        root_pos=torch.zeros(35, 3),
+        root_rot=torch.zeros(35, 4),
+        dof_pos=torch.zeros(35, 2),
+        clip_starts=torch.arange(35),
+        clip_lengths=torch.ones(35, dtype=torch.int64),
+        clip_fps=torch.full((35,), 50.0),
+        clip_name_bytes=torch.tensor(list(encoded_names), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor(name_offsets),
+    )
+    calls: dict[str, object] = {}
+
+    class FakeDeterministicRecorder:
+        def record(self, motions, request):
+            calls["record"] = (motions, request)
+            return ()
+
+    _launch_motion_viewer.main(
+        [
+            "--motion-files",
+            str(package_path),
+            "--headless",
+            "--record-video",
+        ],
+        load_motions=lambda *_, **__: [package],
+        scene_adapter_builder=lambda *_, **__: FakeSceneAdapter(),
+        deterministic_recorder_factory=lambda *_, **__: FakeDeterministicRecorder(),
+    )
+
+    recorded_motions, request = calls["record"]
+    assert recorded_motions == [package]
+    assert [
+        (target.reference_motion_index, target.clip_id, target.source_path)
+        for target in request.targets
+    ] == [(0, clip_id, package_path) for clip_id in range(35)]
+    assert [target.output_path.name for target in request.targets] == [
+        f"clip-{clip_id:02d}.mp4" for clip_id in range(35)
+    ]
+
+
+def test_motion_viewer_main_rejects_duplicate_clip_outputs_before_recorder_creation(
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "package.npz"
+    package_path.write_bytes(b"motion")
+    package = ReferenceMotion(
+        name=package_path.name,
+        root_pos=torch.zeros(2, 3),
+        root_rot=torch.zeros(2, 4),
+        dof_pos=torch.zeros(2, 2),
+        clip_starts=torch.tensor([0, 1]),
+        clip_lengths=torch.tensor([1, 1]),
+        clip_fps=torch.tensor([50.0, 50.0]),
+        clip_name_bytes=torch.tensor(list(b"walk.npzwalk.npz"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, 8, 16]),
+    )
+    output_dir = tmp_path / "videos"
+    recorder_factory_calls = 0
+
+    def fail_if_recorder_is_created(*args, **kwargs):
+        nonlocal recorder_factory_calls
+        del args, kwargs
+        recorder_factory_calls += 1
+        raise AssertionError("duplicate outputs must fail before recorder creation")
+
+    with pytest.raises(ValueError, match="duplicate recording output names: walk.mp4"):
+        _launch_motion_viewer.main(
+            [
+                "--motion-files",
+                str(package_path),
+                "--headless",
+                "--record-video",
+                "--output-dir",
+                str(output_dir),
+            ],
+            load_motions=lambda *_, **__: [package],
+            scene_adapter_builder=lambda *_, **__: FakeSceneAdapter(),
+            deterministic_recorder_factory=fail_if_recorder_is_created,
+        )
+
+    assert recorder_factory_calls == 0
+    assert not output_dir.exists()
 
 
 def test_motion_viewer_main_rejects_display_name_only_recording_identity(
@@ -660,6 +794,31 @@ def test_verify_motion_viewer_path_loads_pyroki_builds_astro_and_applies_one_fra
     assert result is None
     assert len(scene_adapter.applied) == 1
     assert scene_adapter.applied[0][1] == 0
+
+
+def test_verify_motion_viewer_path_applies_first_packed_frame_of_first_span(
+    tmp_path: Path,
+) -> None:
+    package = ReferenceMotion(
+        root_pos=torch.zeros(5, 3),
+        root_rot=torch.zeros(5, 4),
+        dof_pos=torch.zeros(5, 29),
+        clip_starts=torch.tensor([0, 2]),
+        clip_lengths=torch.tensor([2, 3]),
+        clip_fps=torch.tensor([50.0, 50.0]),
+        clip_name_bytes=torch.tensor(list(b"walkjump"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, 4, 8]),
+    )
+    scene_adapter = FakeSceneAdapter()
+
+    _launch_motion_viewer.verify_motion_viewer_path(
+        tmp_path / "package.npz",
+        motion_format="mjlab",
+        load_motions=lambda *_, **__: [package],
+        scene_adapter_builder=lambda *_, **__: scene_adapter,
+    )
+
+    assert scene_adapter.applied == [(package, 0)]
 
 
 def test_verify_motion_viewer_path_labels_bad_pyroki_source_data(

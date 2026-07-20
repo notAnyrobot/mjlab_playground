@@ -217,6 +217,14 @@ def test_versioned_single_clip_round_trips_through_public_writer_and_loader(
     torch.testing.assert_close(loaded.clip_lengths, torch.tensor([3]))
     torch.testing.assert_close(loaded.clip_fps, torch.tensor([50.0]))
     assert loaded.clip_name(0) == "walking-测试.npz"
+    (span,) = loaded.iter_clip_spans()
+    assert span.parent is loaded
+    assert span.clip_id == 0
+    assert span.start_frame == 0
+    assert span.frame_count == 3
+    assert span.fps == 50.0
+    assert span.name == "walking-测试.npz"
+    assert span.to_packed_frame(2) == 2
     assert loaded.dof_names == ("left_hip", "right_hip")
     assert loaded.body_names == ("pelvis", "torso")
     assert loaded.dof_pos.shape[1] == len(loaded.dof_names)

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
+from mjlab_playground.motion_lib import ReferenceMotion
 from mjlab_playground.motion_lib.motion_viewer import MotionViewer, RecordingStatus
 from mjlab_playground.motion_lib.recording import (
     DeterministicRecorder,
@@ -17,6 +19,34 @@ from mjlab_playground.motion_lib.recording import (
     create_subprocess_background_recorder,
     plan_recording_outputs,
 )
+from mjlab_playground.motion_lib.scripts import _record_selected_clip
+
+
+def _implicit_reference_motion(
+    *,
+    name: str,
+    fps: float,
+    frame_count: int,
+) -> ReferenceMotion:
+    return ReferenceMotion(
+        name=name,
+        fps=fps,
+        root_pos=torch.zeros(frame_count, 3),
+        root_rot=torch.zeros(frame_count, 4),
+        dof_pos=torch.zeros(frame_count, 2),
+    )
+
+
+def test_recording_request_target_addresses_one_clip_in_one_reference_motion() -> None:
+    target = RecordingRequestTarget(
+        reference_motion_index=1,
+        clip_id=4,
+        source_path=Path("package.npz"),
+        output_path=Path("clip.mp4"),
+    )
+
+    assert (target.reference_motion_index, target.clip_id) == (1, 4)
+    assert not hasattr(target, "motion_index")
 
 
 class ControllableChildProcess:
@@ -48,15 +78,20 @@ class ControllableChildProcess:
 def test_subprocess_background_recorder_captures_request_and_polls_without_waiting(
     tmp_path: Path,
 ) -> None:
-    motions = [SimpleNamespace(name="walk.npz"), SimpleNamespace(name="jump.npz")]
+    motions = [
+        SimpleNamespace(name="walk.npz", clip_id=0),
+        SimpleNamespace(name="jump.npz", clip_id=0),
+    ]
     targets = (
         RecordingRequestTarget(
-            motion_index=0,
+            reference_motion_index=0,
+            clip_id=0,
             source_path=tmp_path / "walk.npz",
             output_path=tmp_path / "videos" / "walk.mp4",
         ),
         RecordingRequestTarget(
-            motion_index=1,
+            reference_motion_index=1,
+            clip_id=0,
             source_path=tmp_path / "jump.npz",
             output_path=tmp_path / "videos" / "jump.mp4",
         ),
@@ -86,11 +121,42 @@ def test_subprocess_background_recorder_captures_request_and_polls_without_waiti
     assert recorder.output_path == tmp_path / "videos" / "jump.mp4"
 
 
+def test_subprocess_background_recorder_resolves_target_by_clip_identity(
+    tmp_path: Path,
+) -> None:
+    jump = _implicit_reference_motion(name="jump.npz", fps=30.0, frame_count=3)
+    targets = (
+        RecordingRequestTarget(
+            reference_motion_index=1,
+            clip_id=0,
+            source_path=tmp_path / "jump.npz",
+            output_path=tmp_path / "jump.mp4",
+        ),
+        RecordingRequestTarget(
+            reference_motion_index=0,
+            clip_id=0,
+            source_path=tmp_path / "walk.npz",
+            output_path=tmp_path / "walk.mp4",
+        ),
+    )
+    child = ControllableChildProcess()
+    requests: list[RecordingRequest] = []
+    recorder = SubprocessBackgroundRecorder(
+        targets=targets,
+        process_factory=lambda request: (requests.append(request), child)[1],
+    )
+
+    recorder.record_selected_clip(1, next(jump.iter_clip_spans()))
+
+    assert requests == [RecordingRequest(targets=(targets[0],))]
+
+
 def test_subprocess_background_recorder_waits_for_active_child_completion(
     tmp_path: Path,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -100,7 +166,7 @@ def test_subprocess_background_recorder_waits_for_active_child_completion(
         targets=(target,),
         process_factory=lambda _: child,
     )
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
 
     recorder.wait()
 
@@ -114,7 +180,8 @@ def test_subprocess_background_recorder_wait_reports_child_failure(
     tmp_path: Path,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -124,7 +191,7 @@ def test_subprocess_background_recorder_wait_reports_child_failure(
         targets=(target,),
         process_factory=lambda _: child,
     )
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
 
     recorder.wait()
 
@@ -140,12 +207,14 @@ def test_subprocess_background_recorder_cancel_removes_only_current_incomplete_o
     incomplete_output = tmp_path / "incomplete.mp4"
     targets = (
         RecordingRequestTarget(
-            motion_index=0,
+            reference_motion_index=0,
+            clip_id=0,
             source_path=tmp_path / "completed.npz",
             output_path=completed_output,
         ),
         RecordingRequestTarget(
-            motion_index=1,
+            reference_motion_index=1,
+            clip_id=0,
             source_path=tmp_path / "incomplete.npz",
             output_path=incomplete_output,
         ),
@@ -160,9 +229,9 @@ def test_subprocess_background_recorder_cancel_removes_only_current_incomplete_o
     )
     completed_output.write_bytes(b"complete")
     incomplete_output.write_bytes(b"partial")
-    recorder.record_selected_clip(0, SimpleNamespace(name="completed.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="completed.npz", clip_id=0))
     recorder.wait()
-    recorder.record_selected_clip(1, SimpleNamespace(name="incomplete.npz"))
+    recorder.record_selected_clip(1, SimpleNamespace(name="incomplete.npz", clip_id=0))
 
     recorder.cancel()
 
@@ -179,7 +248,8 @@ def test_subprocess_background_recorder_cancel_preserves_output_if_child_just_co
     tmp_path: Path,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -189,7 +259,7 @@ def test_subprocess_background_recorder_cancel_preserves_output_if_child_just_co
         process_factory=lambda _: child,
     )
     target.output_path.write_bytes(b"complete")
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     child.returncode = 0
 
     recorder.cancel()
@@ -208,7 +278,8 @@ def test_subprocess_background_recorder_cancel_uses_kill_fallback_before_releasi
     failure_stage: str,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -235,7 +306,7 @@ def test_subprocess_background_recorder_cancel_uses_kill_fallback_before_releasi
         process_factory=lambda _: next(starts),
     )
     target.output_path.write_bytes(b"partial")
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
 
     recorder.cancel()
 
@@ -246,7 +317,7 @@ def test_subprocess_background_recorder_cancel_uses_kill_fallback_before_releasi
     assert recorder.error == "recording cancelled"
     assert not target.output_path.exists()
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     assert recorder.status is RecordingStatus.RUNNING
     second_child.returncode = 0
     recorder.wait()
@@ -257,7 +328,8 @@ def test_subprocess_background_recorder_close_retries_retained_child_cancellatio
     tmp_path: Path,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -283,7 +355,7 @@ def test_subprocess_background_recorder_close_retries_retained_child_cancellatio
         process_factory=lambda _: next(children),
     )
     target.output_path.write_bytes(b"partial")
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     recorder.cancel()
     assert recorder.status is RecordingStatus.RUNNING
 
@@ -296,7 +368,7 @@ def test_subprocess_background_recorder_close_retries_retained_child_cancellatio
     assert recorder.error == "recording cancelled"
     assert not target.output_path.exists()
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     assert recorder.status is RecordingStatus.RUNNING
     later_child.returncode = 0
     recorder.wait()
@@ -307,7 +379,8 @@ def test_subprocess_background_recorder_close_reports_persistent_child_ownership
     tmp_path: Path,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -338,7 +411,7 @@ def test_subprocess_background_recorder_close_reports_persistent_child_ownership
         process_factory=start_child,
     )
     target.output_path.write_bytes(b"partial")
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
 
     with pytest.raises(RuntimeError, match="failed to close recording child"):
         recorder.close()
@@ -346,7 +419,7 @@ def test_subprocess_background_recorder_close_reports_persistent_child_ownership
     assert recorder.status is RecordingStatus.RUNNING
     assert "forced termination failed" in (recorder.error or "")
     assert target.output_path.read_bytes() == b"partial"
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     assert starts == 1
     assert recorder.status is RecordingStatus.RUNNING
 
@@ -355,7 +428,8 @@ def test_subprocess_background_recorder_rejects_active_request_and_recovers_for_
     tmp_path: Path,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -368,8 +442,8 @@ def test_subprocess_background_recorder_rejects_active_request_and_recovers_for_
         process_factory=lambda request: (requests.append(request), next(children))[1],
     )
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
 
     assert len(requests) == 1
     assert recorder.status is RecordingStatus.RUNNING
@@ -380,7 +454,7 @@ def test_subprocess_background_recorder_rejects_active_request_and_recovers_for_
     assert recorder.status is RecordingStatus.FAILED
     assert recorder.error == "recording child process exited with code 7"
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     assert len(requests) == 2
     assert recorder.status is RecordingStatus.RUNNING
     assert recorder.error is None
@@ -394,7 +468,8 @@ def test_subprocess_background_recorder_reports_child_start_failure_and_allows_r
     tmp_path: Path,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -413,22 +488,23 @@ def test_subprocess_background_recorder_reports_child_start_failure_and_allows_r
         process_factory=start_child,
     )
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     assert recorder.status is RecordingStatus.FAILED
     assert recorder.error == "failed to start recording child: process table full"
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     assert recorder.status is RecordingStatus.RUNNING
     assert recorder.error is None
 
 
-def test_subprocess_background_recorder_factory_reuses_headless_recording_command(
+def test_subprocess_background_recorder_factory_launches_captured_clip_in_internal_child(
     tmp_path: Path,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
-        source_path=tmp_path / "walk.npz",
-        output_path=tmp_path / "videos" / "walk.mp4",
+        reference_motion_index=0,
+        clip_id=4,
+        source_path=tmp_path / "package.npz",
+        output_path=tmp_path / "videos" / "turn.mp4",
     )
     child = ControllableChildProcess()
     commands: list[list[str]] = []
@@ -441,14 +517,15 @@ def test_subprocess_background_recorder_factory_reuses_headless_recording_comman
         process_launcher=lambda command: (commands.append(command), child)[1],
     )
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    clip = SimpleNamespace(clip_id=4)
+    recorder.record_selected_clip(0, clip)
 
     assert commands == [
         [
             sys.executable,
             "-m",
-            "mjlab_playground.motion_lib.scripts.launch_motion_viewer",
-            "--motion-files",
+            "mjlab_playground.motion_lib.scripts._record_selected_clip",
+            "--motion-file",
             str(target.source_path),
             "--format",
             "mjlab",
@@ -458,12 +535,87 @@ def test_subprocess_background_recorder_factory_reuses_headless_recording_comman
             "astro",
             "--device",
             "cpu",
-            "--headless",
-            "--record-video",
-            "--output-dir",
-            str(target.output_path.parent),
+            "--clip-id",
+            "4",
+            "--output",
+            str(target.output_path),
         ]
     ]
+
+
+def test_internal_child_records_only_captured_package_span_from_local_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_path = tmp_path / "package.npz"
+    output_path = tmp_path / "videos" / "jump.mp4"
+    package = ReferenceMotion(
+        name=package_path.name,
+        root_pos=torch.zeros(5, 3),
+        root_rot=torch.zeros(5, 4),
+        dof_pos=torch.zeros(5, 2),
+        clip_starts=torch.tensor([0, 2]),
+        clip_lengths=torch.tensor([2, 3]),
+        clip_fps=torch.tensor([24.0, 50.0]),
+        clip_name_bytes=torch.tensor(list(b"walk.npzjump.npz"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, 8, 16]),
+    )
+    applied: list[tuple[object, int]] = []
+    writes: list[tuple[Path, list[str], float]] = []
+    rendered_frames = iter(["jump-0", "jump-1", "jump-2"])
+    scene = SimpleNamespace(
+        apply_reference_frame=lambda motion, frame_index: applied.append(
+            (motion, frame_index)
+        )
+    )
+    monkeypatch.setattr(
+        _record_selected_clip.launch_motion_viewer,
+        "_load_reference_motions",
+        lambda *_, **__: [package],
+    )
+    monkeypatch.setattr(
+        _record_selected_clip.launch_motion_viewer,
+        "build_scene_adapter",
+        lambda *_, **__: scene,
+    )
+    monkeypatch.setattr(
+        _record_selected_clip.launch_motion_viewer,
+        "_create_deterministic_recorder",
+        lambda *_, **__: DeterministicRecorder(
+            scene=scene,
+            renderer_factory=lambda: SimpleNamespace(
+                render_frame=lambda: next(rendered_frames),
+                close=lambda: None,
+            ),
+            attachment_factory=lambda: RecordingAttachment(
+                write_video=lambda path, frames, *, fps: writes.append(
+                    (path, list(frames), fps)
+                )
+            ),
+        ),
+    )
+
+    _record_selected_clip.main(
+        [
+            "--motion-file",
+            str(package_path),
+            "--format",
+            "mjlab",
+            "--fps",
+            "50",
+            "--robot",
+            "astro",
+            "--device",
+            "cpu",
+            "--clip-id",
+            "1",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert applied == [(package, 2), (package, 3), (package, 4)]
+    assert writes == [(output_path, ["jump-0", "jump-1", "jump-2"], 50.0)]
 
 
 @pytest.mark.parametrize("failure_method", ["poll", "wait"])
@@ -474,7 +626,8 @@ def test_subprocess_background_recorder_retains_child_ownership_after_observatio
     recovery_method: str,
 ) -> None:
     target = RecordingRequestTarget(
-        motion_index=0,
+        reference_motion_index=0,
+        clip_id=0,
         source_path=tmp_path / "walk.npz",
         output_path=tmp_path / "walk.mp4",
     )
@@ -513,7 +666,7 @@ def test_subprocess_background_recorder_retains_child_ownership_after_observatio
     )
     target.output_path.write_bytes(b"partial")
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     getattr(recorder, failure_method)()
 
     assert recorder.status is RecordingStatus.RUNNING
@@ -523,7 +676,7 @@ def test_subprocess_background_recorder_retains_child_ownership_after_observatio
         else "failed to wait for recording child: child wait unavailable"
     )
 
-    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz"))
+    recorder.record_selected_clip(0, SimpleNamespace(name="walk.npz", clip_id=0))
     assert starts == 1
     assert recorder.status is RecordingStatus.RUNNING
     assert recorder.error == f"recording already running: {target.output_path}"
@@ -651,6 +804,50 @@ def test_plan_recording_outputs_uses_one_timestamped_run_directory(
     ]
 
 
+def test_plan_recording_outputs_addresses_every_logical_clip_in_package_order(
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "package.npz"
+    package_path.write_bytes(b"motion")
+    package = ReferenceMotion(
+        name=package_path.name,
+        root_pos=torch.zeros(5, 3),
+        root_rot=torch.zeros(5, 4),
+        dof_pos=torch.zeros(5, 2),
+        clip_starts=torch.tensor([0, 2]),
+        clip_lengths=torch.tensor([2, 3]),
+        clip_fps=torch.tensor([24.0, 50.0]),
+        clip_name_bytes=torch.tensor(list(b"walk.npzjump.npz"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, 8, 16]),
+    )
+    output_dir = tmp_path / "videos"
+
+    plan = plan_recording_outputs(
+        package_path,
+        reference_motions=[package],
+        output_dir=output_dir,
+    )
+
+    assert [target.output_path for target in plan.targets] == [
+        output_dir / "walk.mp4",
+        output_dir / "jump.mp4",
+    ]
+    assert plan.as_request().targets == (
+        RecordingRequestTarget(
+            reference_motion_index=0,
+            clip_id=0,
+            source_path=package_path,
+            output_path=output_dir / "walk.mp4",
+        ),
+        RecordingRequestTarget(
+            reference_motion_index=0,
+            clip_id=1,
+            source_path=package_path,
+            output_path=output_dir / "jump.mp4",
+        ),
+    )
+
+
 def test_plan_recording_outputs_rejects_raw_directory_without_motion_names(
     tmp_path: Path,
 ) -> None:
@@ -736,15 +933,15 @@ def test_deterministic_recorder_traverses_planned_targets_at_motion_fps(
     tmp_path: Path,
 ) -> None:
     motions = [
-        SimpleNamespace(
+        _implicit_reference_motion(
             name="walk.npz",
             fps=24.0,
-            root_pos=np.zeros((2, 3)),
+            frame_count=2,
         ),
-        SimpleNamespace(
+        _implicit_reference_motion(
             name="jump.npz",
             fps=50.0,
-            root_pos=np.zeros((3, 3)),
+            frame_count=3,
         ),
     ]
 
@@ -783,12 +980,14 @@ def test_deterministic_recorder_traverses_planned_targets_at_motion_fps(
     request = RecordingRequest(
         targets=(
             RecordingRequestTarget(
-                motion_index=0,
+                reference_motion_index=0,
+                clip_id=0,
                 source_path=tmp_path / "walk.npz",
                 output_path=tmp_path / "videos" / "walk.mp4",
             ),
             RecordingRequestTarget(
-                motion_index=1,
+                reference_motion_index=1,
+                clip_id=0,
                 source_path=tmp_path / "jump.npz",
                 output_path=tmp_path / "videos" / "jump.mp4",
             ),
@@ -820,12 +1019,72 @@ def test_deterministic_recorder_traverses_planned_targets_at_motion_fps(
     assert renderer.closed is True
 
 
+def test_deterministic_recorder_maps_clip_local_frames_into_the_packed_parent(
+    tmp_path: Path,
+) -> None:
+    package = ReferenceMotion(
+        name="package.npz",
+        fps=30.0,
+        root_pos=torch.zeros(5, 3),
+        root_rot=torch.zeros(5, 4),
+        dof_pos=torch.zeros(5, 2),
+        clip_starts=torch.tensor([0, 2]),
+        clip_lengths=torch.tensor([2, 3]),
+        clip_fps=torch.tensor([24.0, 50.0]),
+        clip_name_bytes=torch.tensor(list(b"walk.npzjump.npz"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, 8, 16]),
+    )
+    applied: list[tuple[object, int]] = []
+    rendered_frames = iter(["jump-0", "jump-1", "jump-2"])
+    writes: list[tuple[Path, list[str], float]] = []
+
+    result = DeterministicRecorder(
+        scene=SimpleNamespace(
+            apply_reference_frame=lambda motion, frame_index: applied.append(
+                (motion, frame_index)
+            )
+        ),
+        renderer_factory=lambda: SimpleNamespace(
+            render_frame=lambda: next(rendered_frames),
+            close=lambda: None,
+        ),
+        attachment_factory=lambda: RecordingAttachment(
+            write_video=lambda path, frames, *, fps: writes.append(
+                (path, list(frames), fps)
+            )
+        ),
+    ).record(
+        [package],
+        RecordingRequest(
+            targets=(
+                RecordingRequestTarget(
+                    reference_motion_index=0,
+                    clip_id=1,
+                    source_path=tmp_path / "package.npz",
+                    output_path=tmp_path / "jump.mp4",
+                ),
+            )
+        ),
+    )
+
+    assert applied == [(package, 2), (package, 3), (package, 4)]
+    assert writes == [(tmp_path / "jump.mp4", ["jump-0", "jump-1", "jump-2"], 50.0)]
+    assert [(item.frame_count, item.fps) for item in result] == [(3, 50.0)]
+
+
 def test_motion_viewer_records_an_already_planned_request() -> None:
-    motions = [SimpleNamespace(root_pos=np.zeros((1, 3)))]
+    motions = [
+        ReferenceMotion(
+            root_pos=torch.zeros(1, 3),
+            root_rot=torch.zeros(1, 4),
+            dof_pos=torch.zeros(1, 2),
+        )
+    ]
     request = RecordingRequest(
         targets=(
             RecordingRequestTarget(
-                motion_index=0,
+                reference_motion_index=0,
+                clip_id=0,
                 source_path=Path("walk.npz"),
                 output_path=Path("walk.mp4"),
             ),
@@ -863,10 +1122,12 @@ def test_motion_viewer_records_an_already_planned_request() -> None:
 def test_motion_viewer_recording_is_independent_of_interactive_playback_state(
     tmp_path: Path,
 ) -> None:
-    motion = SimpleNamespace(
+    motion = ReferenceMotion(
         name="walk.npz",
         fps=24.0,
-        root_pos=np.zeros((3, 3)),
+        root_pos=torch.zeros(3, 3),
+        root_rot=torch.zeros(3, 4),
+        dof_pos=torch.zeros(3, 2),
     )
     applied: list[int] = []
 
@@ -897,7 +1158,8 @@ def test_motion_viewer_recording_is_independent_of_interactive_playback_state(
         RecordingRequest(
             targets=(
                 RecordingRequestTarget(
-                    motion_index=0,
+                    reference_motion_index=0,
+                    clip_id=0,
                     source_path=tmp_path / "walk.npz",
                     output_path=tmp_path / "walk.mp4",
                 ),
@@ -914,9 +1176,9 @@ def test_motion_viewer_recording_is_independent_of_interactive_playback_state(
 @pytest.mark.parametrize(
     ("failure_stage", "message"),
     [
-        ("apply", r"failed to apply frame 1/2 for motion 1/1 \(walk.npz\)"),
-        ("render", r"failed to render frame 1/2 for motion 1/1 \(walk.npz\)"),
-        ("write", r"failed to write recording for motion 1/1 \(walk.npz\)"),
+        ("apply", r"failed to apply frame 1/2 for clip 1/1 \(walk.npz\)"),
+        ("render", r"failed to render frame 1/2 for clip 1/1 \(walk.npz\)"),
+        ("write", r"failed to write recording for clip 1/1 \(walk.npz\)"),
     ],
 )
 def test_deterministic_recorder_reports_failure_context_and_removes_partial_output(
@@ -924,11 +1186,10 @@ def test_deterministic_recorder_reports_failure_context_and_removes_partial_outp
     failure_stage: str,
     message: str,
 ) -> None:
-    motion = SimpleNamespace(
+    motion = _implicit_reference_motion(
         name="walk.npz",
-        display_name="legacy display label",
         fps=30.0,
-        root_pos=np.zeros((2, 3)),
+        frame_count=2,
     )
     output_path = tmp_path / "walk.mp4"
 
@@ -959,7 +1220,8 @@ def test_deterministic_recorder_reports_failure_context_and_removes_partial_outp
     request = RecordingRequest(
         targets=(
             RecordingRequestTarget(
-                motion_index=0,
+                reference_motion_index=0,
+                clip_id=0,
                 source_path=tmp_path / "walk.npz",
                 output_path=output_path,
             ),
@@ -971,7 +1233,7 @@ def test_deterministic_recorder_reports_failure_context_and_removes_partial_outp
 
     if failure_stage == "write":
         assert str(error.value) == (
-            f"failed to write recording for motion 1/1 (walk.npz) to {output_path}"
+            f"failed to write recording for clip 1/1 (walk.npz) to {output_path}"
         )
     assert not output_path.exists()
 
@@ -1026,11 +1288,18 @@ def test_mjlab_recorder_constructs_public_offscreen_renderer_only_when_recording
     assert calls == []
 
     recorder.record(
-        [SimpleNamespace(name="walk.npz", fps=30.0, root_pos=np.zeros((1, 3)))],
+        [
+            _implicit_reference_motion(
+                name="walk.npz",
+                fps=30.0,
+                frame_count=1,
+            )
+        ],
         RecordingRequest(
             targets=(
                 RecordingRequestTarget(
-                    motion_index=0,
+                    reference_motion_index=0,
+                    clip_id=0,
                     source_path=tmp_path / "walk.npz",
                     output_path=tmp_path / "walk.mp4",
                 ),
