@@ -41,8 +41,9 @@ presentation and orchestration modules.
   incoherently named operational metadata is rejected only when span iteration is
   requested.
 - Compact clip names remain CPU metadata and are exposed lazily by each span.
-- Viewer and recording implementations reuse the span mapping while the existing
-  `MotionViewer.run()`, viewer adapter, and background recorder seams remain
-  unchanged.
+- Viewer and recording implementations reuse the span mapping. The existing
+  `MotionViewer.run()` and viewer adapter seams remain unchanged; the internal
+  background-recorder request is refined to carry the canonical outer reference
+  motion index together with the selected span's package-local clip ID.
 - Schema version 1 is unchanged because clip spans are runtime descriptors over
   its existing metadata, not persisted fields.

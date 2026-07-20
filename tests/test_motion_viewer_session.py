@@ -773,8 +773,8 @@ def test_run_preserves_fractional_timing_and_ordered_playback_actions() -> None:
         (walk, 0),
         (walk, 0),
         (walk, 1),
-        (jump, 1),
-        (jump, 1),
+        (jump, 0),
+        (jump, 0),
         (walk, 0),
         (walk, 1),
     ]
@@ -791,13 +791,27 @@ def test_run_preserves_fractional_timing_and_ordered_playback_actions() -> None:
         (0, 0, 1.0, False, False),
         (0, 0, 1.0, False, False),
         (0, 1, 1.0, False, False),
-        (1, 1, 1.25, False, False),
-        (1, 1, 1.25, True, False),
+        (1, 0, 1.25, False, False),
+        (1, 0, 1.25, True, False),
         (0, 0, 1.25, True, False),
         (0, 1, 1.0, False, False),
         (0, 1, 1.0, False, True),
     ]
     assert adapter.close_calls == 1
+
+
+def test_clip_selection_applies_first_frame_before_advancing_new_clip() -> None:
+    walk = FakeReferenceMotion(name="walk", frame_count=4, fps=2.0)
+    jump = FakeReferenceMotion(name="jump", frame_count=3, fps=4.0)
+    scene = InMemoryMotionScene()
+    adapter = ScriptedViewerAdapter(
+        [ViewerTick(elapsed_seconds=0.25, actions=(PlaybackAction.NEXT_CLIP,))]
+    )
+
+    MotionViewer([walk, jump], scene, viewer_adapter=adapter).run()
+
+    assert scene.applications == [(jump, 0)]
+    assert adapter.snapshots[0].frame_index == 0
 
 
 def test_scene_failure_stops_closes_once_and_preserves_original_cause() -> None:

@@ -408,7 +408,13 @@ class MotionViewer:
                 f"invalid viewer tick elapsed_seconds: {tick.elapsed_seconds!r}"
             ) from cause
 
+        clip_was_selected = False
         for action in tick.actions:
+            if action in (
+                PlaybackAction.PREVIOUS_CLIP,
+                PlaybackAction.NEXT_CLIP,
+            ):
+                clip_was_selected = True
             self._apply_session_action(action)
 
         if self._background_recorder is not None:
@@ -417,7 +423,11 @@ class MotionViewer:
         if not self._stop_requested:
             self.controller.advance(
                 frame_count=self.selected_clip.frame_count,
-                frames=elapsed_seconds * self.selected_clip.fps,
+                frames=(
+                    0.0
+                    if clip_was_selected
+                    else elapsed_seconds * self.selected_clip.fps
+                ),
             )
             frame_count = self.selected_clip.frame_count
             frame_index = self.controller.current_frame_index(frame_count=frame_count)
