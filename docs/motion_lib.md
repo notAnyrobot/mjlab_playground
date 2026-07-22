@@ -37,7 +37,7 @@ The module deliberately separates these responsibilities:
 These boundaries are recorded in the accepted ADRs:
 
 - [Split Reference Motion Viewer From Launch Runner](adr/0001-split-reference-motion-viewer-from-launch-runner.md)
-- [Make the Reference Motion Viewer Presentation Agnostic](adr/0002-make-reference-motion-viewer-presentation-agnostic.md)
+- [Make the Reference Motion Viewer Presentation Agnostic](adr/0007-make-reference-motion-viewer-presentation-agnostic.md)
 - [Use Versioned NPZ Reference Motion Artifacts](adr/0003-use-versioned-npz-reference-motion-artifacts.md)
 - [Use Reference Motion Clip Spans for Packed Logical Clips](adr/0004-use-reference-motion-clip-spans.md)
 - [Run Source to Reference Motion Artifact Production From the Source Runner](adr/0005-run-source-to-reference-motion-artifact.md)
