@@ -141,6 +141,128 @@ singular output path. It publishes no intermediate one-clip artifacts.
 If clip metadata is absent, both sampling and query treat the full packed tensor
 as one clip.
 
+#### Sampling input
+
+Runtime sampling operates on one packed `ReferenceMotion`. Multi-clip values
+provide contiguous `clip_starts`, per-clip frame-count `clip_lengths`, and
+per-clip `clip_fps` metadata:
+
+```python
+import torch
+
+from mjlab_playground.motion_lib import ReferenceMotion
+
+clip_lengths = torch.tensor([6, 11], dtype=torch.long)
+clip_starts = torch.tensor([0, 6], dtype=torch.long)
+frame_count = int(clip_lengths.sum())
+
+reference_motion = ReferenceMotion(
+    name="training-reference",
+    fps=10.0,
+    root_pos=torch.zeros(frame_count, 3),
+    root_rot=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(frame_count, 1),
+    dof_pos=torch.zeros(frame_count, 29),
+    clip_starts=clip_starts,
+    clip_lengths=clip_lengths,
+    clip_fps=torch.full((clip_lengths.numel(),), 10.0),
+)
+```
+
+`clip_starts` index into packed frame tensors, while `clip_fps` converts
+clip-local seconds into frame positions. When these fields are omitted,
+`MotionManager`, `MimicMotionManager`, and `MotionLib.query()` treat the full
+frame tensor as one clip. `ReferenceMotionState` remains only as a deprecated
+compatibility alias; new code should use `ReferenceMotion`.
+
+#### AMP-style expert batches
+
+Use `MotionManager.sample_batch()` for temporary expert batches. Sampling does
+not mutate persistent environment tracks:
+
+```python
+from mjlab_playground.motion_lib import (
+    MotionLib,
+    MotionLibCfg,
+    MotionManager,
+    MotionManagerCfg,
+)
+
+motion_lib = MotionLib(MotionLibCfg(output_fps=10.0))
+manager = MotionManager(
+    reference_motion,
+    MotionManagerCfg(
+        clip_weighting="duration",
+        time_sampling="uniform",
+        history_seconds=0.2,
+        future_seconds=0.1,
+    ),
+)
+
+expert_sample = manager.sample_batch(256)
+expert_state = motion_lib.query(
+    reference_motion,
+    motion_ids=expert_sample.motion_ids,
+    motion_times=expert_sample.motion_times,
+)
+```
+
+The sampler output is motion IDs and motion times only. Consumers pass those
+tensors to `MotionLib.query()` when they need root, joint, body, or contact
+tensors; MotionLib owns query and interpolation.
+
+#### Persistent mimic tracks
+
+Use `MimicMotionManager` when each environment needs persistent reference
+playback state. `sample_envs()` assigns selected tracks, `advance_envs()` moves
+active tracks by elapsed seconds, and `done_envs()` reports tracks that would
+exceed their valid sampling windows:
+
+```python
+import torch
+
+from mjlab_playground.motion_lib import MimicMotionManager, MotionManagerCfg
+
+mimic_manager = MimicMotionManager(
+    reference_motion,
+    num_envs=4096,
+    cfg=MotionManagerCfg(
+        clip_weighting="uniform",
+        time_sampling="adaptive",
+        future_seconds=0.2,
+    ),
+)
+
+reset_env_ids = torch.tensor([0, 7, 42], dtype=torch.long)
+reset_sample = mimic_manager.sample_envs(reset_env_ids)
+reset_state = motion_lib.query(
+    reference_motion,
+    motion_ids=reset_sample.motion_ids,
+    motion_times=reset_sample.motion_times,
+)
+
+mimic_manager.advance_envs(dt=1.0 / 50.0)
+done_mask = mimic_manager.done_envs(lookahead=0.2)
+query_mask = (mimic_manager.motion_ids >= 0) & ~done_mask
+active_state = motion_lib.query(
+    reference_motion,
+    motion_ids=mimic_manager.motion_ids[query_mask],
+    motion_times=mimic_manager.motion_times[query_mask],
+)
+```
+
+For adaptive sampling, call
+`mimic_manager.report_env_outcomes(env_ids, failed=...)` after task outcomes are
+known. This updates manager-owned failure pressure; it does not query motion
+tensors or reset environments.
+
+#### V1 boundaries
+
+The managers own clip weighting, valid time windows, time selection, adaptive
+failure pressure, and mimic track state. MotionLib owns query and interpolation
+over the packed reference tensors. Out of scope for v1: rewind sampling,
+contact-label resampling, viewer integration, and packaged artifact metadata
+beyond runtime clip metadata.
+
 ### Viewing and recording
 
 The launch runner loads motions, constructs a robot scene and presentation
@@ -295,7 +417,7 @@ fixed number of environments. `sample_envs`, `advance_envs`, `done_envs`, and
 outcome reporting manage reference playback state; consumers still call
 `MotionLib.query()` separately.
 
-See [Motion Manager Usage](motion_manager.md) for focused examples.
+See [Runtime sampling](#runtime-sampling) for construction and query examples.
 
 ### `reference_motion_npz_writer.py`
 

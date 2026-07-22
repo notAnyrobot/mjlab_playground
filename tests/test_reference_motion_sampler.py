@@ -10,7 +10,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-MANAGER_DOC = ROOT / "docs" / "motion_manager.md"
+MOTION_LIB_DOC = ROOT / "docs" / "motion_lib.md"
+MOTION_LIB_README = SRC / "mjlab_playground" / "motion_lib" / "README.md"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
@@ -96,10 +97,12 @@ def test_motion_lib_does_not_export_old_sampler_class_names() -> None:
         )
 
 
-def test_motion_manager_docs_show_public_usage_and_v1_boundaries() -> None:
-    assert MANAGER_DOC.exists()
+def test_motion_lib_docs_show_motion_manager_usage_and_v1_boundaries() -> None:
+    assert MOTION_LIB_DOC.exists()
+    assert MOTION_LIB_README.exists()
+    assert not (ROOT / "docs" / "motion_manager.md").exists()
     assert not (ROOT / "docs" / "motion_sampler.md").exists()
-    text = MANAGER_DOC.read_text(encoding="utf-8")
+    text = MOTION_LIB_DOC.read_text(encoding="utf-8")
     required = [
         "ReferenceMotion",
         "clip_starts",
@@ -124,6 +127,10 @@ def test_motion_manager_docs_show_public_usage_and_v1_boundaries() -> None:
     ]
     for needle in required:
         assert needle in text
+
+    readme = MOTION_LIB_README.read_text(encoding="utf-8")
+    for needle in ("sample_batch", "sample_envs", "advance_envs", "done_envs"):
+        assert needle in readme
 
 
 def test_motion_manager_returns_valid_start_times_from_windowed_package() -> None:
@@ -321,7 +328,9 @@ def test_motion_manager_sample_can_be_handed_to_motion_lib_query_seam() -> None:
         motion_times=sample.motion_times,
     )
 
-    torch.testing.assert_close(query_result["motion_ids"], torch.ones(4, dtype=torch.long))
+    torch.testing.assert_close(
+        query_result["motion_ids"], torch.ones(4, dtype=torch.long)
+    )
     torch.testing.assert_close(query_result["motion_times"], torch.zeros(4))
 
 

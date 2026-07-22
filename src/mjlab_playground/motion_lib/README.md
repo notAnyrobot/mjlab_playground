@@ -140,6 +140,64 @@ public headless mode emits one video per logical clip, in stored clip order.
 Use synthetic automated coverage for whole-package regression checks rather
 than routinely rendering all 35 real videos.
 
+### 4. Sample expert batches and mimic tracks
+
+Using the `package` loaded in the previous step, `MotionManager` samples
+temporary expert batches without querying reference tensors. Pass the sampled
+clip IDs and clip-local times to `MotionLib.query()`:
+
+```python
+from mjlab_playground.motion_lib import (
+    MotionLib,
+    MotionLibCfg,
+    MotionManager,
+    MotionManagerCfg,
+)
+
+motion_lib = MotionLib(MotionLibCfg(output_fps=50.0))
+manager = MotionManager(
+    package,
+    MotionManagerCfg(
+        clip_weighting="duration",
+        time_sampling="uniform",
+        history_seconds=0.2,
+        future_seconds=0.1,
+    ),
+)
+sample = manager.sample_batch(256)
+expert_state = motion_lib.query(
+    package,
+    motion_ids=sample.motion_ids,
+    motion_times=sample.motion_times,
+)
+```
+
+Use `MimicMotionManager` when environments need persistent reference playback:
+
+```python
+import torch
+
+from mjlab_playground.motion_lib import MimicMotionManager
+
+mimic_manager = MimicMotionManager(package, num_envs=4096)
+reset_env_ids = torch.tensor([0, 7, 42], dtype=torch.long)
+mimic_manager.sample_envs(reset_env_ids)
+mimic_manager.advance_envs(dt=1.0 / 50.0)
+
+done_mask = mimic_manager.done_envs(lookahead=0.2)
+active_mask = (mimic_manager.motion_ids >= 0) & ~done_mask
+active_state = motion_lib.query(
+    package,
+    motion_ids=mimic_manager.motion_ids[active_mask],
+    motion_times=mimic_manager.motion_times[active_mask],
+)
+```
+
+The managers own sampling policy and track state; `MotionLib` owns tensor query
+and interpolation. See the maintainer reference's
+[runtime sampling](../../../docs/motion_lib.md#runtime-sampling) section for the
+packed metadata contract, adaptive outcome reporting, and v1 boundaries.
+
 ## Command-line tools
 
 ### `run_motion_lib`
