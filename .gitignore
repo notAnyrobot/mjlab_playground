@@ -47,8 +47,11 @@ data/
 .mypy_cache/
 
 # Misc
+.DS_Store
+MUJOCO_LOG.TXT
 .scratch/
 .vscode/
 .worktrees/
+.ua/
 docs/superpowers/
 docs/agents/
