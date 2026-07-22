@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import argparse
 import math
 import os
 import tempfile
-from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -305,100 +303,8 @@ class ReferenceMotionNpzWriter:
         return tensor.detach().cpu().numpy()
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Perform reference motion assembly over versioned reference motion "
-            "artifacts and write the resulting versioned reference motion artifact."
-        )
-    )
-    parser.add_argument(
-        "--input",
-        required=True,
-        type=Path,
-        help=(
-            "Versioned reference motion artifact or flat directory of versioned "
-            "reference motion artifacts."
-        ),
-    )
-    parser.add_argument(
-        "--output",
-        required=True,
-        type=Path,
-        help="Destination versioned reference motion artifact.",
-    )
-    parser.add_argument(
-        "--device",
-        default="cpu",
-        help=(
-            "Device used to load artifacts and perform reference motion assembly "
-            "(default: cpu)."
-        ),
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Replace an existing versioned reference motion artifact.",
-    )
-    return parser.parse_args(argv)
-
-
-def package_reference_motions(
-    input_path: str | Path,
-    output_path: str | Path,
-    *,
-    device: str | torch.device = "cpu",
-    overwrite: bool = False,
-) -> None:
-    """Perform reference motion assembly over versioned reference motion artifacts."""
-    from .motion_loader import MotionLoader, ReferenceMotion
-
-    source_path = Path(input_path)
-    clips = MotionLoader.load(
-        source_path,
-        motion_format="mjlab",
-        device=device,
-    )
-    input_paths = [
-        source_path / (clip.name or f"clip-{clip_id}")
-        if source_path.is_dir()
-        else source_path
-        for clip_id, clip in enumerate(clips)
-    ]
-    for clip, failing_input in zip(clips, input_paths, strict=True):
-        if clip.clip_starts is None:
-            raise ValueError(
-                f"{failing_input}: reference motion assembly requires a versioned "
-                "reference motion artifact with schema version 1; legacy rich "
-                "reference artifacts are not accepted"
-            )
-        if clip.clip_starts.numel() != 1:
-            raise ValueError(
-                f"{failing_input}: reference motion assembly accepts only one-clip "
-                "versioned reference motion artifacts; the input reference motion "
-                "contains multiple clips"
-            )
-
-    try:
-        assembled_motion = ReferenceMotion.from_clips(clips, device=device)
-    except (TypeError, ValueError) as exc:
-        input_order = ", ".join(
-            f"clip {clip_id}={path}" for clip_id, path in enumerate(input_paths)
-        )
-        raise type(exc)(f"{input_order}: {exc}") from exc
-    ReferenceMotionNpzWriter().write(assembled_motion, output_path, overwrite=overwrite)
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parse_args(argv)
-    package_reference_motions(
-        args.input,
-        args.output,
-        device=args.device,
-        overwrite=args.overwrite,
-    )
-    print(f"wrote {args.output}")
-
-
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        "reference_motion_npz_writer is not a command; use python -m "
+        "mjlab_playground.motion_lib.scripts.run_motion_lib"
+    )

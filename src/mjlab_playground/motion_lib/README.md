@@ -10,7 +10,7 @@ Use this module when you need to:
 - load PyRoki `.npz` clips as canonical `ReferenceMotion` values;
 - resample generalized-coordinate trajectories to a target FPS;
 - enrich trajectories with MuJoCo-derived body poses and velocities;
-- write or assemble versioned, device-neutral reference motion `.npz` artifacts;
+- publish versioned, device-neutral reference motion `.npz` artifacts;
 - inspect or record motions with native MuJoCo or browser-based Viser; or
 - sample clip IDs and clip-local times for AMP- or mimic-style consumers.
 
@@ -24,8 +24,8 @@ PyRoki source clips
     -> MotionLib.load()
     -> MotionLib.resample()
     -> MotionLib.enrich()
-    -> one versioned rich .npz artifact per clip
-    -> optional multi-clip assembly
+    -> ReferenceMotion.from_clips()
+    -> one versioned reference motion artifact
     -> viewer, sampler, or training consumer
 ```
 
@@ -38,10 +38,11 @@ state. Versioned artifacts preserve rich tensors plus clip and axis metadata.
 Run commands from the repository root after completing the
 [project setup](../../../README.md#getting-started).
 
-### 1. Export a rich versioned clip
+### 1. Build a versioned reference motion artifact
 
 This example loads one bundled PyRoki clip, resamples it from 30 Hz to 50 Hz,
-enriches it with the Astro MuJoCo model, and writes a versioned artifact:
+enriches it with the Astro MuJoCo model, performs one-clip reference motion
+assembly, and publishes one versioned artifact:
 
 ```bash
 uv run python -m mjlab_playground.motion_lib.scripts.run_motion_lib \
@@ -51,17 +52,17 @@ uv run python -m mjlab_playground.motion_lib.scripts.run_motion_lib \
   --output-fps 50 \
   --robot astro \
   --device cpu \
-  --output-dir /tmp/mjlab-motion-lib
+  --output-file /tmp/astro-jogging-reference-motion.npz
 ```
 
-The command prints the path it writes. Existing output files are not replaced;
-choose a fresh output directory when repeating the example.
+The command prints the path it writes. Existing output files are protected by
+default; pass `--overwrite` only when replacement is intentional.
 
-### 2. Inspect the exported clip
+### 2. Inspect the artifact
 
 ```bash
 uv run python -m mjlab_playground.motion_lib.scripts.launch_motion_viewer \
-  --motion-files /tmp/mjlab-motion-lib/0005_0005_Jogging001_poses_keypoints_retargeted.npz \
+  --motion-files /tmp/astro-jogging-reference-motion.npz \
   --format mjlab \
   --fps 50 \
   --robot astro \
@@ -73,31 +74,12 @@ selects native MuJoCo on Linux when a display is available. Use `--smoke-test`
 instead of launching an interactive viewer when you only need to validate that
 the motion can be loaded and applied to the robot scene.
 
-### 3. Assemble several exported clips
+### 3. Build and use the complete Astro SFU artifact
 
-After exporting multiple one-clip artifacts into a flat directory, assemble
-them into one versioned multi-clip artifact:
-
-```bash
-uv run python -m mjlab_playground.motion_lib.reference_motion_npz_writer \
-  --input /tmp/mjlab-motion-lib \
-  --output /tmp/astro-sfu-reference-motion.npz \
-  --device cpu
-```
-
-Assembly accepts versioned, one-clip `mjlab` artifacts with compatible FPS,
-DOF order, body order, and contact presence. It does not accept legacy rich
-artifacts or an already assembled multi-clip artifact. Pass `--overwrite`
-explicitly if replacing the destination is intentional.
-
-### 4. Build and use the complete Astro SFU artifact
-
-Build all 35 trusted direct-child PyRoki clips in sorted filename order through a
-fresh staging directory, then publish the assembled artifact:
+Build all 35 trusted direct-child PyRoki clips in sorted filename order and
+publish one assembled artifact:
 
 ```bash
-STAGE_DIR="$(mktemp -d /tmp/mjlab-astro-sfu.XXXXXX)"
-
 uv run python -m mjlab_playground.motion_lib.scripts.run_motion_lib \
   --motion-files assets/motions/astro/sfu/pyroki-retargeted-astro \
   --format pyroki \
@@ -105,18 +87,13 @@ uv run python -m mjlab_playground.motion_lib.scripts.run_motion_lib \
   --output-fps 50 \
   --robot astro \
   --device cpu \
-  --output-dir "$STAGE_DIR"
-
-uv run python -m mjlab_playground.motion_lib.reference_motion_npz_writer \
-  --input "$STAGE_DIR" \
-  --output assets/motions/astro/sfu/mjlab-astro.npz \
-  --device cpu
+  --output-file assets/motions/astro/sfu/mjlab-astro.npz
 ```
 
-Both publication steps are no-clobber. Always use a fresh stage, and do not pass
-legacy unversioned rich artifacts to the assembly command. The staged one-clip
-artifacts are disposable only after validation; the trusted PyRoki inputs and
-the assembled artifact are the durable inputs and output.
+Publication is atomic and no-clobber by default. Add `--overwrite` only for an
+intentional atomic replacement. The runner publishes no intermediate one-clip
+artifacts; the trusted PyRoki inputs and final versioned reference motion
+artifact are the durable inputs and output.
 
 The verified `mjlab-astro.npz` artifact uses schema v1 and contains 35 clips,
 39,225 packed frames at 50 FPS, 29 DOFs, and 31 bodies. Loading it produces one
@@ -167,8 +144,9 @@ than routinely rendering all 35 real videos.
 
 ### `run_motion_lib`
 
-Runs the explicit `load -> resample -> enrich -> write` pipeline and produces
-one versioned rich artifact per source clip.
+Runs the complete source-to-artifact workflow: load source clips, transform each
+clip through `MotionLib`, perform reference motion assembly, and atomically
+publish one versioned reference motion artifact.
 
 ```bash
 uv run python -m mjlab_playground.motion_lib.scripts.run_motion_lib --help
@@ -179,8 +157,10 @@ Important behavior:
 - Inputs are one `.npz` file or a flat directory of direct-child `.npz` files.
 - PyRoki is the implemented source format in v1; `proto` is reserved.
 - Astro is the only implemented robot in v1.
-- `--output-dir` defaults to an `mjlab-astro` sibling of the source directory.
-- Publication is no-clobber; this runner intentionally has no overwrite flag.
+- `--output-file` is required and names the singular published artifact.
+- Publication is no-clobber by default; `--overwrite` explicitly enables atomic
+  replacement.
+- The runner creates no intermediate one-clip artifacts.
 
 ### `launch_motion_viewer`
 
@@ -239,19 +219,6 @@ uv run python -m mjlab_playground.motion_lib.scripts.convert_pyroki_to_gmr --hel
 The converter refuses to replace existing output unless `--force-remake` is
 provided.
 
-### `reference_motion_npz_writer`
-
-The writer module is directly runnable so assembly stays next to the serializer
-instead of requiring another runner file.
-
-```bash
-uv run python -m mjlab_playground.motion_lib.reference_motion_npz_writer --help
-```
-
-It loads versioned one-clip artifacts, assembles them in sorted input order, and
-publishes the result atomically. The durable artifact is device-neutral even
-when another device is selected for loading and assembly.
-
 ## Python entry points
 
 The package root exports the stable values, pipeline, and sampling interfaces:
@@ -275,12 +242,12 @@ those boundaries.
 
 ## Common failures
 
-- **Output already exists:** use a new `--output-dir`, or use `--overwrite` only
-  with the directly runnable NPZ writer.
+- **Output already exists:** choose a new `--output-file`, or pass `--overwrite`
+  to `run_motion_lib` only when atomic replacement is intentional.
 - **`proto` is not implemented:** choose `--format pyroki` for source processing
   or use `--format mjlab` with the viewer for versioned/legacy rich artifacts.
 - **Native viewer on macOS:** use `--viewer viser` or the default `auto` mode.
-- **Assembly rejects an input:** verify that every input is a versioned one-clip
-  artifact and that FPS, DOF names, body names, and contact presence match.
+- **Reference motion assembly rejects a clip:** verify that transformed clips
+  have matching FPS, DOF names, body names, dtype, device, and contact presence.
 - **Unexpected files are ignored:** directory inputs are intentionally flat;
   nested directories are not scanned recursively.

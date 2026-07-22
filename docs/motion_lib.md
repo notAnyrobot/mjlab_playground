@@ -18,7 +18,7 @@ reference motion values and their runtime use:
 ```text
 source adapter -> canonical value -> resampler -> simulator enrichment
                                              \-> viewer
-rich clip -> versioned serializer -> one-clip artifact(s) -> assembly
+rich clips -> reference motion assembly -> versioned serializer -> one artifact
 assembled reference motion -> sampler -> MotionLib.query() -> consumer batch
 ```
 
@@ -28,6 +28,7 @@ The module deliberately separates these responsibilities:
 - `MotionLib` owns source loading, resampling, simulator enrichment, and query.
 - `ReferenceMotion` owns frame values and compatible in-memory clip assembly.
 - `ReferenceMotionNpzWriter` owns durable versioned serialization.
+- `run_motion_lib` owns source-to-artifact orchestration.
 - `MotionManager` and `MimicMotionManager` own sampling policy and track state.
 - `MotionViewer` owns playback semantics behind injected scene, presentation,
   and recording interfaces.
@@ -39,6 +40,7 @@ These boundaries are recorded in the accepted ADRs:
 - [Make the Reference Motion Viewer Presentation Agnostic](adr/0002-make-reference-motion-viewer-presentation-agnostic.md)
 - [Use Versioned NPZ Reference Motion Artifacts](adr/0003-use-versioned-npz-reference-motion-artifacts.md)
 - [Use Reference Motion Clip Spans for Packed Logical Clips](adr/0004-use-reference-motion-clip-spans.md)
+- [Run Source to Reference Motion Artifact Production From the Source Runner](adr/0005-run-source-to-reference-motion-artifact.md)
 
 ## Domain model
 
@@ -70,14 +72,14 @@ in-memory assembly with on-disk serialization.
 | Name | Role | Current support |
 |---|---|---|
 | `pyroki` | Source-format adapter | Implemented. Requires `base_frame_pos`, `base_frame_wxyz`, and `joint_angles`. |
-| `mjlab` | Versioned or legacy rich `.npz` loader | Implemented in `MotionLoader` and the viewer. Versioned v1 is required for assembly. |
+| `mjlab` | Versioned or legacy rich `.npz` loader | Implemented in `MotionLoader`, runtime consumers, and the viewer. New durable output uses versioned v1. |
 | `proto` | Reserved source-format name | Not implemented. Public CLIs may expose the reserved choice but fail clearly. |
 | GMR `.pkl` | Compatibility output | Written by `convert_pyroki_to_gmr`; it is not accepted by `MotionLib`. |
 
 `MotionLibCfg` narrows the transformation pipeline further: v1 accepts only
 `source_format="pyroki"` and `robot="astro"`. The lower-level loader has the
-wider format switch because viewers and assembly must also consume `mjlab`
-artifacts.
+wider format switch because viewers and runtime consumers must also consume
+`mjlab` artifacts.
 
 Viewer presentation support is:
 
@@ -117,11 +119,14 @@ internal boundaries remain visible at call sites.
 3. `MotionLib.enrich(motion)` accepts one already-resampled clip. It applies each
    frame to one cached `MujocoSceneAdapter` and reads body pose and velocity
    fields back from the Astro scene.
-4. `ReferenceMotionNpzWriter.write(...)` validates and atomically publishes the
-   resulting rich clip.
+4. The source runner passes every rich clip to `ReferenceMotion.from_clips()` in
+   loader order, including when only one clip was loaded.
+5. `ReferenceMotionNpzWriter.write(...)` validates and atomically publishes the
+   assembled canonical value exactly once.
 
 The scalar `resample` and `enrich` interfaces make orchestration explicit. The
-runner owns loops over clips and reports the identity of a failing clip.
+runner owns loops over clips, cross-module sequencing, failure context, and the
+singular output path. It publishes no intermediate one-clip artifacts.
 
 ### Runtime sampling
 
@@ -305,9 +310,10 @@ The writer refuses replacement by default. For no-clobber publication it writes
 and fsyncs a temporary file, then links it into place. Explicit overwrite uses
 `os.replace`. Temporary files are removed after success or failure.
 
-The module-level `package_reference_motions(...)` and `main()` form the thin
-assembly CLI. They accept only versioned one-clip inputs, delegate compatible
-assembly to `ReferenceMotion.from_clips`, and delegate publication to the writer.
+The writer is a pure serializer: it accepts any valid canonical one-clip or
+multi-clip `ReferenceMotion` without inspecting clip count or source origin. It
+does not load inputs, perform reference motion assembly, or expose a command-line
+entry point.
 
 ### `_reference_motion_npz_schema.py`
 
@@ -439,13 +445,9 @@ configuration. Reusable behavior should remain in the modules above.
 
 | Module | Responsibility |
 |---|---|
-| `run_motion_lib` | Loops over source clips, calls the scalar MotionLib stages, and writes one versioned rich artifact per clip. |
+| `run_motion_lib` | Loads source clips, transforms each through the scalar `MotionLib` stages, assembles them through `ReferenceMotion.from_clips()`, and publishes one versioned reference motion artifact through the writer. |
 | `launch_motion_viewer` | Loads motions, constructs the Astro scene and selected presentation, and wires recording or smoke-test paths. |
 | `convert_pyroki_to_gmr` | Converts PyRoki arrays to the GMR pickle compatibility layout and changes root quaternion order to GMR `xyzw`. |
-
-The directly runnable `reference_motion_npz_writer` is intentionally adjacent to
-the serializer rather than placed in `scripts/` because its orchestration is only
-load, assemble, and write.
 
 ## Versioned artifact contract
 
@@ -475,18 +477,17 @@ legacy layout semantics; new durable output must be versioned.
 ### Artifact lifecycle
 
 For a multi-clip artifact build, trusted source clips and the final versioned
-artifact are durable. One-clip versioned artifacts belong in a fresh temporary
-stage and are disposable only after the final artifact has been validated.
-Source discovery and assembly are deterministic, sorted, and limited to direct
-children. Publication is atomic and no-clobber by default; legacy rich artifacts
-are never assembly inputs. Schema v1 remains the one authoritative format, with
-no manifest, sidecar, provenance extension, dependency, or derived PyTorch
-cache.
+artifact are durable. The source runner transforms every clip before reference
+motion assembly and publishes no intermediate artifacts. Source discovery is
+deterministic, sorted, and limited to direct children; assembly preserves that
+loader order. Publication is atomic and no-clobber by default, with explicit
+overwrite permission for intentional replacement. Schema v1 remains the one
+authoritative format, with no manifest, sidecar, provenance extension,
+dependency, or derived PyTorch cache.
 
 The validated Astro SFU artifact at
 `assets/motions/astro/sfu/mjlab-astro.npz` contains 35 clips and 39,225 frames at
-50 FPS, with 29 DOFs and 31 bodies. It was assembled from 35 versioned one-clip
-staging artifacts and checked array-by-array against that canonical stage.
+50 FPS, with 29 DOFs and 31 bodies.
 
 ## Extension guidance
 
@@ -540,7 +541,7 @@ Errors should identify the boundary and offending motion or path:
 
 - loaders prefix file-specific failures with the source path;
 - scalar transformation stages include the motion identity;
-- assembly errors report the deterministic clip/input order;
+- runner assembly errors report deterministic loader order;
 - viewer smoke tests label load, scene construction, and frame application
   phases; and
 - recording errors remove incomplete outputs where possible.
@@ -556,8 +557,8 @@ atomic publication are data-safety contracts, not convenience behavior.
 | PyRoki and `mjlab` loading | `tests/test_motion_loaders.py` |
 | Pipeline stages and package query | `tests/test_motion_lib.py` |
 | Resampling math and contracts | `tests/test_reference_motion_resampler.py`, `tests/test_motion_math_util.py` |
-| Versioned schema, writing, assembly, and CLI | `tests/test_reference_motion_npz_writer.py` |
-| Pipeline runner | `tests/test_run_motion_lib.py` |
+| Versioned schema and clip-count-agnostic serialization | `tests/test_reference_motion_npz_writer.py` |
+| Source-to-artifact orchestration, assembly, and publication | `tests/test_run_motion_lib.py` |
 | Sampling and mimic tracks | `tests/test_reference_motion_sampler.py` |
 | Playback/session semantics | `tests/test_motion_viewer_session.py` |
 | Viewer launch, selection, and smoke test | `tests/test_launch_motion_viewer.py` |

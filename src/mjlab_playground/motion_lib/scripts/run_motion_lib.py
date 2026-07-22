@@ -14,18 +14,17 @@ ROBOT_CHOICES = ("astro",)
 
 @dataclass(frozen=True)
 class MotionLibRunResult:
-    """In-memory output of the explicit MotionLib stage pipeline."""
+    """Published output of the source-to-reference-motion pipeline."""
 
-    source_motions: list[Any]
-    resampled_motions: list[Any]
-    rich_motions: list[Any]
-    written_paths: list[Path]
+    assembled_motion: Any
+    written_path: Path
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the MotionLib load -> resample -> enrich reference motion pipeline."
+            "Transform source motion clips and publish one assembled versioned "
+            "reference motion artifact."
         )
     )
     parser.add_argument(
@@ -59,12 +58,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="astro",
         help="Robot model used for simulator enrichment.",
     )
-    parser.add_argument("--device", default="cpu", help="Device used for motion tensors.")
     parser.add_argument(
-        "--output-dir",
+        "--device", default="cpu", help="Device used for motion tensors."
+    )
+    parser.add_argument(
+        "--output-file",
+        required=True,
         type=Path,
-        default=None,
-        help="Directory where exported rich reference .npz clips are written.",
+        help="Destination versioned reference motion artifact.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Atomically replace an existing destination artifact.",
     )
     return parser.parse_args(argv)
 
@@ -83,20 +89,32 @@ def _load_writer_class() -> type[Any]:
     return ReferenceMotionNpzWriter
 
 
+def _load_reference_motion_class() -> type[Any]:
+    from mjlab_playground.motion_lib.motion_loader import ReferenceMotion
+
+    return ReferenceMotion
+
+
+def _motion_identity(motion: Any) -> str:
+    name = getattr(motion, "name", None)
+    return str(name) if name else "<unnamed clip>"
+
+
 def run_pipeline(
     motion_files: str | Path,
     *,
+    output_file: str | Path,
     motion_format: MotionLibRunnerFormat = "pyroki",
     source_fps: float = 30.0,
     output_fps: float = 50.0,
     robot: MotionLibRunnerRobot = "astro",
     device: str = "cpu",
-    output_dir: str | Path | None = None,
+    overwrite: bool = False,
     motion_lib_cls: type[Any] | None = None,
     motion_lib_cfg_cls: type[Any] | None = None,
     writer_cls: type[Any] | None = None,
 ) -> MotionLibRunResult:
-    """Run MotionLib's explicit load, resample, and enrich stages."""
+    """Transform source clips and publish one assembled reference motion."""
     if motion_lib_cls is None or motion_lib_cfg_cls is None:
         default_motion_lib_cls, default_motion_lib_cfg_cls = _load_motion_lib_classes()
     else:
@@ -118,54 +136,57 @@ def run_pipeline(
     )
     motion_lib = motion_lib_cls(cfg)
 
-    source_motions = list(motion_lib.load(motion_files))
-    writer_cls = writer_cls or _load_writer_class()
-    writer = writer_cls()
-    export_dir = (
-        Path(output_dir)
-        if output_dir is not None
-        else _default_output_dir(motion_files)
-    )
-    resampled_motions: list[Any] = []
+    source_path = Path(motion_files)
+    try:
+        source_motions = list(motion_lib.load(motion_files))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load source motions from {source_path}: {exc}"
+        ) from exc
     rich_motions: list[Any] = []
-    written_paths: list[Path] = []
-    for source_motion in source_motions:
-        resampled_motion = motion_lib.resample(source_motion)
-        resampled_motions.append(resampled_motion)
-        rich_motion = motion_lib.enrich(resampled_motion)
-        rich_motions.append(rich_motion)
-        output_path = export_dir / _output_filename_for_motion(rich_motion)
+    for clip_index, source_motion in enumerate(source_motions):
+        identity = _motion_identity(source_motion)
         try:
-            writer.write(rich_motion, output_path)
+            resampled_motion = motion_lib.resample(source_motion)
         except Exception as exc:
             raise RuntimeError(
-                f"Failed to export {_motion_identity(rich_motion)} to {output_path}: {exc}"
+                f"Failed to resample clip {clip_index} ({identity}): {exc}"
             ) from exc
-        written_paths.append(output_path)
-    return MotionLibRunResult(
-        source_motions=source_motions,
-        resampled_motions=resampled_motions,
-        rich_motions=rich_motions,
-        written_paths=written_paths,
+        try:
+            rich_motion = motion_lib.enrich(resampled_motion)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to enrich clip {clip_index} ({identity}): {exc}"
+            ) from exc
+        rich_motions.append(rich_motion)
+
+    ordered_identities = ", ".join(
+        f"{clip_index}: {_motion_identity(motion)}"
+        for clip_index, motion in enumerate(rich_motions)
     )
-
-
-def _output_filename_for_motion(motion: Any) -> str:
-    identity = _motion_identity(motion)
-    return Path(identity).with_suffix(".npz").name
-
-
-def _motion_identity(motion: Any) -> str:
-    identity = getattr(motion, "name", None)
-    if not identity:
-        raise ValueError("rich reference motion must expose a name for export")
-    return str(identity)
-
-
-def _default_output_dir(motion_files: str | Path) -> Path:
-    source_path = Path(motion_files)
-    source_root = source_path if source_path.is_dir() else source_path.parent
-    return source_root.parent / "mjlab-astro"
+    try:
+        assembled_motion = _load_reference_motion_class().from_clips(
+            rich_motions,
+            device=device,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed during reference motion assembly for clips in loader order "
+            f"[{ordered_identities}]: {exc}"
+        ) from exc
+    written_path = Path(output_file)
+    writer_cls = writer_cls or _load_writer_class()
+    try:
+        writer_cls().write(assembled_motion, written_path, overwrite=overwrite)
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to write versioned reference motion artifact to "
+            f"{written_path}: {exc}"
+        ) from exc
+    return MotionLibRunResult(
+        assembled_motion=assembled_motion,
+        written_path=written_path,
+    )
 
 
 def main(
@@ -178,23 +199,19 @@ def main(
     args = parse_args(argv)
     result = run_pipeline(
         args.motion_files,
+        output_file=args.output_file,
         motion_format=args.motion_format,
         source_fps=args.source_fps,
         output_fps=args.output_fps,
         robot=args.robot,
         device=args.device,
-        output_dir=args.output_dir,
+        overwrite=args.overwrite,
         motion_lib_cls=motion_lib_cls,
         motion_lib_cfg_cls=motion_lib_cfg_cls,
         writer_cls=writer_cls,
     )
-    _report_written_paths(result.written_paths)
+    print(f"wrote {result.written_path}")
     return result
-
-
-def _report_written_paths(written_paths: Sequence[Path]) -> None:
-    for path in written_paths:
-        print(f"wrote {path}")
 
 
 if __name__ == "__main__":
