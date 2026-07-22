@@ -72,9 +72,9 @@ _Avoid_: PyRoki viewer, motion file viewer, loader viewer
 A viewer camera whose target follows the rendered robot root body during reference motion playback or recording while preserving user control over view angle and distance.
 _Avoid_: Fixed world camera, source motion camera
 
-**Reference motion resampler**:
-An internal motion-library implementation detail that converts a reference motion clip to a target frame rate by interpolating generalized coordinates and deriving generalized-coordinate velocity fields. It does not load files, write files, or derive body-state tensors.
-_Avoid_: Motion loader, simulator enricher, file converter
+**Reference motion resampling**:
+The transformation of a metadata-free source motion clip to a target frame rate by interpolating generalized coordinates and deriving generalized-coordinate velocity fields. It does not load files, write files, or derive body-state tensors.
+_Avoid_: Reference motion resampler, simulator enrichment, file conversion
 
 **Simulator enrichment**:
 A preprocessing step owned by MotionLib that applies already-resampled robot-specific generalized coordinates to a robot model or simulator to derive rich reference clip fields such as body poses and body velocities.
@@ -86,7 +86,7 @@ _Avoid_: Motion viewer, motion loader, viewer adapter
 
 **MuJoCo scene adapter**:
 The motion-library module that owns a one-environment mjlab MuJoCo scene, robot entity, simulation step/update order, reference-frame application, display synchronization, root-tracking camera setup, and current robot-state reading. It does not own motion-level enrichment or package assembly.
-_Avoid_: Motion viewer, source loader, resampler
+_Avoid_: Motion viewer, source loader, reference motion resampling
 
 **Reference body contract**:
 The ordered robot body set used when simulator enrichment turns generalized-coordinate motion into policy-facing body trajectories and body contact labels. It follows the robot entity's resolved body order so body-indexed tensors and future metadata share one body axis.
@@ -109,7 +109,7 @@ Artifact-level information including FPS, clip starts, clip lengths, clip names,
 _Avoid_: Implicit axis order, external YAML metadata, joint names
 
 **Generalized-coordinate velocity**:
-A velocity field derived only from generalized-coordinate reference tensors, such as root position, root quaternion, and joint positions. These fields are produced by the reference motion resampler, not by simulator enrichment.
+A velocity field derived only from generalized-coordinate reference tensors, such as root position, root quaternion, and joint positions. These fields are produced during reference motion resampling, not by simulator enrichment.
 _Avoid_: Body velocity, simulator velocity
 
 **MotionLib**:

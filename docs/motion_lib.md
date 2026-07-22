@@ -16,8 +16,8 @@ The motion library owns the path from robot-specific source motion to canonical
 reference motion values and their runtime use:
 
 ```text
-source adapter -> canonical value -> resampler -> simulator enrichment
-                                             \-> viewer
+source adapter -> canonical source clip -> MotionLib.resample() -> simulator enrichment
+                                                          \-> viewer
 rich clips -> reference motion assembly -> versioned serializer -> one artifact
 assembled reference motion -> sampler -> MotionLib.query() -> consumer batch
 ```
@@ -41,6 +41,7 @@ These boundaries are recorded in the accepted ADRs:
 - [Use Versioned NPZ Reference Motion Artifacts](adr/0003-use-versioned-npz-reference-motion-artifacts.md)
 - [Use Reference Motion Clip Spans for Packed Logical Clips](adr/0004-use-reference-motion-clip-spans.md)
 - [Run Source to Reference Motion Artifact Production From the Source Runner](adr/0005-run-source-to-reference-motion-artifact.md)
+- [Keep Reference Motion Resampling Behind MotionLib](adr/0006-keep-reference-motion-resampling-behind-motionlib.md)
 
 ## Domain model
 
@@ -102,9 +103,9 @@ Viewer presentation support is:
 | `ReferenceMotionSample` | Sampled clip IDs and clip-local times. |
 | `ClipWeighting`, `TimeSampling` | Sampling policy type aliases. |
 
-Loaders, resamplers, the NPZ writer, viewer classes, adapters, and recording
-helpers are not re-exported. Import those from their defining submodules so
-internal boundaries remain visible at call sites.
+Loaders, the NPZ writer, viewer classes, adapters, and recording helpers are not
+re-exported. Import those from their defining submodules so internal seams remain
+visible at call sites.
 
 ## Data flow and ownership
 
@@ -113,9 +114,9 @@ internal boundaries remain visible at call sites.
 1. `MotionLib.load(path)` delegates to `MotionLoader` using configuration-owned
    source format, FPS, and device. It returns a list because one flat directory
    can contain several source clips.
-2. `MotionLib.resample(motion)` accepts one `ReferenceMotion`. It interpolates
-   generalized-coordinate fields and derives generalized-coordinate velocity
-   fields at `output_fps`.
+2. `MotionLib.resample(motion)` accepts one metadata-free source
+   `ReferenceMotion`. It interpolates generalized-coordinate fields and derives
+   generalized-coordinate velocity fields at `output_fps`.
 3. `MotionLib.enrich(motion)` accepts one already-resampled clip. It applies each
    frame to one cached `MujocoSceneAdapter` and reads body pose and velocity
    fields back from the Astro scene.
@@ -369,25 +370,12 @@ The public transformation and query facade:
 - `query(...)` interpolates package-shaped reference tensors by clip ID and
   clip-local seconds.
 
-`resample` rejects already-rich clips and contact-bearing clips. `enrich`
-rejects the wrong FPS, existing rich body fields, and source foot contacts. The
-class does not assemble or serialize artifacts.
-
-### `motion_resampler.py`
-
-#### `MotionResamplingCfg`
-
-Internal frozen configuration containing the positive integer-valued output
-FPS.
-
-#### `ReferenceMotionResampler`
-
-Resamples one source clip using a deterministic target timeline. Positions and
-joint values interpolate linearly; root quaternions use normalized spherical
-interpolation. It derives root linear velocity, root angular velocity, and DOF
-velocity from generalized-coordinate tensors. It does not load, enrich, write,
-or preserve source contact labels. V1 supports equal-rate output and upsampling;
-it rejects downsampling.
+`resample` rejects explicit clip or axis metadata, already-rich clips,
+contact-bearing clips, and downsampling. It uses a deterministic target timeline:
+positions and joint values interpolate linearly, root quaternions use normalized
+spherical interpolation, and generalized-coordinate velocities are recomputed.
+`enrich` rejects the wrong FPS, existing rich body fields, and source foot
+contacts. The class does not assemble or serialize artifacts.
 
 ### `motion_manager.py`
 
@@ -678,7 +666,7 @@ atomic publication are data-safety contracts, not convenience behavior.
 | Canonical values and frame/clip assembly | `tests/test_reference_motion.py` |
 | PyRoki and `mjlab` loading | `tests/test_motion_loaders.py` |
 | Pipeline stages and package query | `tests/test_motion_lib.py` |
-| Resampling math and contracts | `tests/test_reference_motion_resampler.py`, `tests/test_motion_math_util.py` |
+| Resampling math and contracts | `tests/test_motion_lib.py`, `tests/test_motion_math_util.py` |
 | Versioned schema and clip-count-agnostic serialization | `tests/test_reference_motion_npz_writer.py` |
 | Source-to-artifact orchestration, assembly, and publication | `tests/test_run_motion_lib.py` |
 | Sampling and mimic tracks | `tests/test_reference_motion_sampler.py` |

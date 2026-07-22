@@ -9,6 +9,12 @@ from typing import Any, Literal
 
 import torch
 
+from .math_util import (
+    finite_difference_velocity,
+    lerp_frame_values,
+    quaternion_angular_velocity_wxyz,
+    slerp_frame_quaternions_wxyz,
+)
 from .motion_loader import (
     MotionFormat,
     MotionLoader,
@@ -16,7 +22,6 @@ from .motion_loader import (
     ReferenceMotion,
     _validate_integer_fps,
 )
-from .motion_resampler import MotionResamplingCfg, ReferenceMotionResampler
 from .mujoco_scene_adapter import MujocoSceneAdapter, MujocoSceneAdapterCfg
 
 MotionLibRobot = Literal["astro"]
@@ -90,6 +95,15 @@ class MotionLibCfg:
 class MotionLib:
     """Public source-to-rich reference motion stage interface."""
 
+    _RESAMPLE_METADATA_FIELDS = (
+        "clip_starts",
+        "clip_lengths",
+        "clip_fps",
+        "clip_name_bytes",
+        "clip_name_offsets",
+        "dof_names",
+        "body_names",
+    )
     _ENRICH_INPUT_RICH_FIELDS = (
         "body_pos",
         "body_rot",
@@ -97,6 +111,7 @@ class MotionLib:
         "body_ang_vel",
         "body_contacts",
     )
+    _RESAMPLE_UNSUPPORTED_FIELDS = (*_ENRICH_INPUT_RICH_FIELDS, "foot_contacts")
     _ENRICH_OUTPUT_BODY_FIELDS = (
         "body_pos",
         "body_rot",
@@ -106,9 +121,6 @@ class MotionLib:
 
     def __init__(self, cfg: MotionLibCfg) -> None:
         self.cfg = cfg
-        self._resampler = ReferenceMotionResampler(
-            MotionResamplingCfg(output_fps=cfg.output_fps)
-        )
         self._enrichment_adapter: Any | None = None
 
     def load(self, motion_files: str | Path) -> list[ReferenceMotion]:
@@ -128,10 +140,69 @@ class MotionLib:
         if not isinstance(motion, ReferenceMotion):
             raise TypeError("MotionLib.resample expects one ReferenceMotion")
         try:
-            return self._resampler.resample(motion)
+            self._validate_resample_input(motion)
+            frame_positions = self._target_resample_frame_positions(motion)
+            root_pos = lerp_frame_values(motion.root_pos, frame_positions)
+            root_rot = slerp_frame_quaternions_wxyz(
+                motion.root_rot,
+                frame_positions,
+            )
+            dof_pos = lerp_frame_values(motion.dof_pos, frame_positions)
+            return ReferenceMotion(
+                root_pos=root_pos,
+                root_rot=root_rot,
+                dof_pos=dof_pos,
+                name=motion.name,
+                fps=self.cfg.output_fps,
+                root_lin_vel=finite_difference_velocity(
+                    root_pos,
+                    self.cfg.output_fps,
+                ),
+                root_ang_vel=quaternion_angular_velocity_wxyz(
+                    root_rot,
+                    self.cfg.output_fps,
+                ),
+                dof_vel=finite_difference_velocity(
+                    dof_pos,
+                    self.cfg.output_fps,
+                ),
+            )
         except Exception as exc:
             identifier = self._motion_identifier(motion)
             raise type(exc)(f"{identifier}: {exc}") from exc
+
+    def _validate_resample_input(self, motion: ReferenceMotion) -> None:
+        for field_name in self._RESAMPLE_METADATA_FIELDS:
+            if getattr(motion, field_name) is not None:
+                raise ValueError(
+                    "MotionLib.resample v1 accepts one metadata-free source "
+                    f"clip; got metadata field {field_name}"
+                )
+        if self.cfg.output_fps < motion.fps:
+            raise ValueError(
+                "MotionLib.resample v1 does not support downsampling: "
+                f"output_fps={self.cfg.output_fps}, motion.fps={motion.fps}"
+            )
+        for field_name in self._RESAMPLE_UNSUPPORTED_FIELDS:
+            if getattr(motion, field_name) is not None:
+                raise ValueError(
+                    "MotionLib.resample v1 accepts generalized-coordinate source "
+                    f"clips only; got unsupported field {field_name}"
+                )
+
+    def _target_resample_frame_positions(
+        self,
+        motion: ReferenceMotion,
+    ) -> torch.Tensor:
+        duration = (motion.root_pos.shape[0] - 1) / motion.fps
+        target_frames = int(round(duration * self.cfg.output_fps)) + 1
+        return torch.linspace(
+            0.0,
+            float(motion.root_pos.shape[0] - 1),
+            target_frames,
+            dtype=motion.root_pos.dtype,
+            device=motion.root_pos.device,
+        )
 
     def query(
         self,
@@ -432,9 +503,7 @@ class MotionLib:
         rich_motion: object,
     ) -> None:
         if not isinstance(rich_motion, ReferenceMotion):
-            raise TypeError(
-                "MotionLib.enrich must return ReferenceMotion objects"
-            )
+            raise TypeError("MotionLib.enrich must return ReferenceMotion objects")
         for field_name in self._ENRICH_OUTPUT_BODY_FIELDS:
             if getattr(rich_motion, field_name) is None:
                 identifier = self._motion_identifier(source_motion)

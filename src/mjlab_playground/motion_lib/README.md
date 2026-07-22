@@ -293,8 +293,8 @@ from mjlab_playground.motion_lib import (
 )
 ```
 
-Persistence, loading adapters, resampling internals, viewers, and recording
-helpers are intentionally imported from their defining submodules. See the
+Persistence, loading adapters, viewers, and recording helpers are intentionally
+imported from their defining submodules. See the
 [maintainer reference](../../../docs/motion_lib.md#class-by-class-reference) for
 those boundaries.
 

@@ -82,9 +82,44 @@ def _package_reference_motion():
     )
 
 
-def _z_quat(degrees: float) -> torch.Tensor:
+def _z_quat(
+    degrees: float,
+    *,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
     radians = math.radians(degrees)
-    return torch.tensor([math.cos(radians / 2.0), 0.0, 0.0, math.sin(radians / 2.0)])
+    return torch.tensor(
+        [math.cos(radians / 2.0), 0.0, 0.0, math.sin(radians / 2.0)],
+        dtype=dtype,
+    )
+
+
+def _resample_source_motion(
+    *,
+    fps: float = 30.0,
+    dtype: torch.dtype = torch.float32,
+):
+    from mjlab_playground.motion_lib import ReferenceMotion
+
+    return ReferenceMotion(
+        name="motion.npz",
+        fps=fps,
+        root_pos=torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            dtype=dtype,
+        ),
+        root_rot=torch.stack(
+            [
+                _z_quat(0.0, dtype=dtype),
+                _z_quat(90.0, dtype=dtype),
+                _z_quat(180.0, dtype=dtype),
+            ]
+        ),
+        dof_pos=torch.tensor(
+            [[0.0, 10.0], [2.0, 20.0], [4.0, 30.0]],
+            dtype=dtype,
+        ),
+    )
 
 
 def _reject_adapter_creation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -418,8 +453,18 @@ def test_motion_lib_cfg_validates_v1_pipeline_options() -> None:
     with pytest.raises(ValueError, match="source_fps must be integer-valued"):
         MotionLibCfg(source_fps=29.97)
 
-    with pytest.raises(ValueError, match="output_fps must be positive and finite"):
-        MotionLibCfg(output_fps=0.0)
+
+@pytest.mark.parametrize(
+    "output_fps",
+    [0.0, -30.0, 29.97, float("inf"), float("nan")],
+)
+def test_motion_lib_cfg_requires_positive_finite_integer_output_fps(
+    output_fps: float,
+) -> None:
+    from mjlab_playground.motion_lib import MotionLibCfg
+
+    with pytest.raises(ValueError):
+        MotionLibCfg(output_fps=output_fps)
 
 
 def test_motion_lib_load_does_not_accept_contact_label_paths() -> None:
@@ -498,6 +543,146 @@ def test_motion_lib_resamples_loaded_source_clip_to_output_fps(
     )
     torch.testing.assert_close(motion.root_ang_vel, torch.zeros(5, 3))
     torch.testing.assert_close(motion.dof_vel, torch.tensor([[15.0, 15.0]] * 5))
+
+
+def test_motion_lib_resample_upsamples_coordinates_and_velocities() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    source_motion = _resample_source_motion(dtype=torch.float64)
+
+    motion = MotionLib(MotionLibCfg(output_fps=60.0)).resample(source_motion)
+
+    assert motion is not source_motion
+    assert motion.name == "motion.npz"
+    assert motion.fps == 60.0
+    assert motion.root_pos.dtype == torch.float64
+    assert motion.root_pos.device == source_motion.root_pos.device
+    assert motion.root_pos.shape == (5, 3)
+    torch.testing.assert_close(
+        motion.root_pos[:, 0],
+        torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0], dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        motion.dof_pos,
+        torch.tensor(
+            [[0.0, 10.0], [1.0, 15.0], [2.0, 20.0], [3.0, 25.0], [4.0, 30.0]],
+            dtype=torch.float64,
+        ),
+    )
+    torch.testing.assert_close(
+        motion.root_rot,
+        torch.stack(
+            [
+                _z_quat(0.0, dtype=torch.float64),
+                _z_quat(45.0, dtype=torch.float64),
+                _z_quat(90.0, dtype=torch.float64),
+                _z_quat(135.0, dtype=torch.float64),
+                _z_quat(180.0, dtype=torch.float64),
+            ]
+        ),
+    )
+    torch.testing.assert_close(
+        motion.root_lin_vel,
+        torch.tensor([[30.0, 0.0, 0.0]] * 5, dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        motion.dof_vel,
+        torch.tensor([[60.0, 300.0]] * 5, dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        motion.root_ang_vel,
+        torch.tensor([[0.0, 0.0, 15.0 * math.pi]] * 5, dtype=torch.float64),
+    )
+
+
+def test_motion_lib_resample_rejects_downsampling_with_name() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"motion\.npz: MotionLib\.resample v1 does not support downsampling: "
+            r"output_fps=30\.0, motion\.fps=60\.0"
+        ),
+    ):
+        MotionLib(MotionLibCfg(output_fps=30.0)).resample(
+            _resample_source_motion(fps=60.0)
+        )
+
+
+def test_motion_lib_resample_slerp_uses_shortest_quaternion_path() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg, ReferenceMotion
+
+    motion = ReferenceMotion(
+        fps=30.0,
+        root_pos=torch.zeros(3, 3),
+        root_rot=torch.stack([_z_quat(0.0), -_z_quat(90.0), _z_quat(180.0)]),
+        dof_pos=torch.zeros(3, 2),
+    )
+
+    result = MotionLib(MotionLibCfg(output_fps=60.0)).resample(motion)
+
+    torch.testing.assert_close(result.root_rot[1], _z_quat(45.0))
+
+
+def test_motion_lib_resample_recomputes_existing_velocity_fields() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    motion = dataclasses.replace(
+        _resample_source_motion(),
+        root_lin_vel=torch.ones(3, 3),
+        root_ang_vel=torch.ones(3, 3),
+        dof_vel=torch.ones(3, 2),
+    )
+
+    result = MotionLib(MotionLibCfg(output_fps=30.0)).resample(motion)
+
+    torch.testing.assert_close(
+        result.root_lin_vel,
+        torch.tensor([[30.0, 0.0, 0.0]] * 3),
+    )
+    torch.testing.assert_close(
+        result.root_ang_vel,
+        torch.tensor([[0.0, 0.0, 15.0 * math.pi]] * 3),
+    )
+    torch.testing.assert_close(
+        result.dof_vel,
+        torch.tensor([[60.0, 300.0]] * 3),
+    )
+
+
+def test_motion_lib_resample_rejects_explicit_clip_metadata() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    motion = dataclasses.replace(
+        _reference_motion(fps=30.0),
+        clip_starts=torch.tensor([0]),
+        clip_lengths=torch.tensor([3]),
+        clip_fps=torch.tensor([30.0]),
+        clip_name_bytes=torch.tensor(list(b"walk_retargeted.npz"), dtype=torch.uint8),
+        clip_name_offsets=torch.tensor([0, len(b"walk_retargeted.npz")]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"walk_retargeted\.npz.*metadata-free source clip.*clip_starts",
+    ):
+        MotionLib(MotionLibCfg(output_fps=60.0)).resample(motion)
+
+
+def test_motion_lib_resample_rejects_explicit_axis_metadata() -> None:
+    from mjlab_playground.motion_lib import MotionLib, MotionLibCfg
+
+    motion = dataclasses.replace(
+        _reference_motion(fps=30.0),
+        dof_names=("left_hip", "right_hip"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"walk_retargeted\.npz.*metadata-free source clip.*dof_names",
+    ):
+        MotionLib(MotionLibCfg(output_fps=60.0)).resample(motion)
 
 
 def test_motion_lib_resample_rejects_contact_bearing_clip_with_name(
