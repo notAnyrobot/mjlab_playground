@@ -53,5 +53,3 @@ MUJOCO_LOG.TXT
 .vscode/
 .worktrees/
 .ua/
-docs/superpowers/
-docs/agents/
